@@ -1,0 +1,23 @@
+.github/workflows/build-desktop.yml
+  fe53204233f96999 17-18,20-33,35-38,40-41,50-58,61,65,67-69
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.7",
+  "base_commit_sha": "141943c288f99fb07ef2e6864cb0e426ca633689",
+  "prompts": {
+    "fe53204233f96999": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "conv_20260904_mdlite_macos_three_targets",
+        "model": "gpt-5"
+      },
+      "human_author": "qisiii",
+      "messages": [],
+      "total_additions": 37,
+      "total_deletions": 7,
+      "accepted_lines": 37,
+      "overriden_lines": 0
+    }
+  }
+}

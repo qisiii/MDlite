@@ -1,0 +1,23 @@
+.github/workflows/build-desktop.yml
+  cbe5db2fed854d3c 80-83
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.7",
+  "base_commit_sha": "f798defa11d9de9729bb8c3cba4b456a535bfea0",
+  "prompts": {
+    "cbe5db2fed854d3c": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "conv_20260904_mdlite_release_tag_checkout",
+        "model": "gpt-5"
+      },
+      "human_author": "qisiii",
+      "messages": [],
+      "total_additions": 4,
+      "total_deletions": 0,
+      "accepted_lines": 4,
+      "overriden_lines": 0
+    }
+  }
+}

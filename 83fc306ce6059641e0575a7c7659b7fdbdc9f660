@@ -1,0 +1,25 @@
+README.md
+  fe2a4ab80d2930ec 23,35-48
+.github/workflows/build-desktop.yml
+  fe2a4ab80d2930ec 8-10,32-71
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.7",
+  "base_commit_sha": "83fc306ce6059641e0575a7c7659b7fdbdc9f660",
+  "prompts": {
+    "fe2a4ab80d2930ec": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "conv_20260904_mdlite_github_release",
+        "model": "gpt-5"
+      },
+      "human_author": "qisiii",
+      "messages": [],
+      "total_additions": 59,
+      "total_deletions": 0,
+      "accepted_lines": 59,
+      "overriden_lines": 0
+    }
+  }
+}

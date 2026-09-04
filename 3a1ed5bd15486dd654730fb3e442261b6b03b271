@@ -1,0 +1,23 @@
+.gitignore
+  bd71e642c56c213e 1-6
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.7",
+  "base_commit_sha": "3a1ed5bd15486dd654730fb3e442261b6b03b271",
+  "prompts": {
+    "bd71e642c56c213e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "conv_20260904_mdlite_gitignore_generated",
+        "model": "gpt-5"
+      },
+      "human_author": "qisiii",
+      "messages": [],
+      "total_additions": 6,
+      "total_deletions": 4,
+      "accepted_lines": 6,
+      "overriden_lines": 0
+    }
+  }
+}

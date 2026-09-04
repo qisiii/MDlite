@@ -2,7 +2,9 @@ use arboard::Clipboard;
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde::Serialize;
 use std::{fs, io::Write, path::{Path, PathBuf}, time::{SystemTime, UNIX_EPOCH}};
-use tauri::{menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder}, AppHandle, Emitter, Manager, RunEvent, Runtime};
+use tauri::{menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder}, AppHandle, Emitter, Manager, Runtime};
+#[cfg(any(target_os = "macos", target_os = "ios", target_os = "android"))]
+use tauri::RunEvent;
 use tauri_plugin_clipboard_manager::ClipboardExt;
 
 mod app_config;
@@ -411,6 +413,7 @@ fn main() {
     .build(tauri::generate_context!())
     .unwrap_or_else(|error| panic!("启动 {} 失败：{}", APP_NAME, error))
     .run(|app_handle, event| {
+      #[cfg(any(target_os = "macos", target_os = "ios", target_os = "android"))]
       if let RunEvent::Opened { urls } = event {
         for url in urls {
           if let Ok(path) = url.to_file_path() {
@@ -420,5 +423,7 @@ fn main() {
           }
         }
       }
+      #[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "android")))]
+      let _ = (app_handle, event);
     });
 }

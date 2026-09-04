@@ -14,10 +14,31 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-latest
+          - id: macos-universal
+            os: macos-latest
             bundles: dmg
-          - os: windows-latest
+            target: universal-apple-darwin
+            rust_targets: aarch64-apple-darwin,x86_64-apple-darwin
+          - id: macos-intel
+            os: macos-latest
+            bundles: dmg
+            target: x86_64-apple-darwin
+            rust_targets: x86_64-apple-darwin
+          - id: macos-apple-silicon
+            os: macos-latest
+            bundles: dmg
+            target: aarch64-apple-darwin
+            rust_targets: aarch64-apple-darwin
+          - id: windows-x64
+            os: windows-latest
             bundles: nsis,msi
+            target: x86_64-pc-windows-msvc
+            rust_targets: x86_64-pc-windows-msvc
+          - id: windows-x86
+            os: windows-latest
+            bundles: nsis,msi
+            target: i686-pc-windows-msvc
+            rust_targets: i686-pc-windows-msvc
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -26,17 +47,26 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      - name: Install Rust toolchain and target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_targets }}
+      - name: Restore Rust build cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "./src-tauri -> target"
+          shared-key: ${{ matrix.id }}
       - uses: tauri-apps/tauri-action@v0
         with:
-          args: --bundles ${{ matrix.bundles }}
+          args: --bundles ${{ matrix.bundles }} --target ${{ matrix.target }}
       - name: Upload installers
         uses: actions/upload-artifact@v7
         with:
-          name: installers-${{ runner.os }}
+          name: installers-${{ matrix.id }}
           path: |
-            src-tauri/target/release/bundle/dmg/*.dmg
-            src-tauri/target/release/bundle/nsis/*.exe
-            src-tauri/target/release/bundle/msi/*.msi
+            src-tauri/target/**/release/bundle/dmg/*.dmg
+            src-tauri/target/**/release/bundle/nsis/*.exe
+            src-tauri/target/**/release/bundle/msi/*.msi
           if-no-files-found: error
           retention-days: 7
 

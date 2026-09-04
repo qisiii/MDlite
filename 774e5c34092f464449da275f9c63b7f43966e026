@@ -1,0 +1,25 @@
+index.html
+  53b85685df4316d3 36-44,48
+src/style.css
+  53b85685df4316d3 2,15-43,46-57
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.7",
+  "base_commit_sha": "774e5c34092f464449da275f9c63b7f43966e026",
+  "prompts": {
+    "53b85685df4316d3": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a06c44-3e9d-74c3-9fa0-2d162299d467",
+        "model": "gpt-5"
+      },
+      "human_author": "qisiii",
+      "messages": [],
+      "total_additions": 52,
+      "total_deletions": 2,
+      "accepted_lines": 52,
+      "overriden_lines": 0
+    }
+  }
+}

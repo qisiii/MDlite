@@ -55,3 +55,14 @@ html[data-theme="dark"] .document code { background:#26334b; color:#ffc1cc; }
 html[data-theme="dark"] .table-wrap,html[data-theme="dark"] .mermaid-box { border-color:var(--line); }
 html[data-theme="dark"] .table-wrap thead th,html[data-theme="dark"] .table-wrap tbody tr:first-child td { background:#263b63; }
 html[data-theme="dark"] .find-replace-bar input,html[data-theme="dark"] .find-dialog input { background:#111a2b; color:var(--ink); }
+
+.recent-documents { padding:8px 0; border-bottom:1px solid var(--line); }
+.recent-title { padding:0 12px 4px; color:var(--muted); font-size:11px; font-weight:700; }
+.recent-file { display:block; width:100%; border:0; border-radius:0; padding:5px 12px; overflow:hidden; color:#344054; background:transparent; text-align:left; }
+.recent-file:hover { border:0; background:var(--blue-bg); }
+.recent-file.active { color:#1d57d9; background:#eaf1ff; font-weight:700; }
+.recent-file-name,.recent-file-path { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.recent-file-path { color:var(--muted); font-size:10px; font-weight:400; }
+.recent-empty { padding:3px 12px; color:var(--muted); font-size:11px; }
+html[data-theme="dark"] .recent-file { color:var(--ink); }
+html[data-theme="dark"] .recent-file.active { color:#b9ceff; background:var(--blue-bg); }

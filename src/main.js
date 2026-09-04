@@ -8,8 +8,8 @@ import "./style.css";
 
 const APP_VERSION = __APP_VERSION__;
 const APP_NAME = __APP_NAME__;
-const ui = Object.fromEntries(["appVersion", "saveState", "fileTree", "fileCount", "editor", "editorHighlights", "currentPath", "dirtyMark", "preview", "previewState", "workspace", "documentOutline", "outlineToggle", "themeToggle", "mermaidModal", "modalCanvas", "modalZoom", "findReplaceModal", "findText", "replaceText", "findStatus", "createModal", "createTitle", "createName", "createTarget", "reloadModal", "reloadFileName", "reloadMessage"].map(id => [id, document.getElementById(id)]));
-const state = { roots: new Map(), docs: new Map(), selectedFolder: null, activeRoot: null, expandedFolders: new Set(), current: null, dirty: false, mermaidSequence: 0, fullscreen: null, createKind: null, pasteShortcutToken: null, findPasteToken: null, previewMatch: null, history: [], historyIndex: -1, historyApplying: false, reloadCheckPromise: null, reloadConflict: null, restoringSession: false, sessionSaveQueue: Promise.resolve(), themeTimer: null };
+const ui = Object.fromEntries(["appVersion", "saveState", "fileTree", "fileCount", "recentList", "editor", "editorHighlights", "currentPath", "dirtyMark", "preview", "previewState", "workspace", "documentOutline", "outlineToggle", "themeToggle", "mermaidModal", "modalCanvas", "modalZoom", "findReplaceModal", "findText", "replaceText", "findStatus", "createModal", "createTitle", "createName", "createTarget", "reloadModal", "reloadFileName", "reloadMessage"].map(id => [id, document.getElementById(id)]));
+const state = { roots: new Map(), docs: new Map(), recentDocuments: [], selectedFolder: null, activeRoot: null, expandedFolders: new Set(), current: null, dirty: false, mermaidSequence: 0, fullscreen: null, createKind: null, pasteShortcutToken: null, findPasteToken: null, previewMatch: null, history: [], historyIndex: -1, historyApplying: false, reloadCheckPromise: null, reloadConflict: null, restoringSession: false, sessionSaveQueue: Promise.resolve(), themeTimer: null };
 mermaid.initialize({ startOnLoad: false, securityLevel: "strict", theme: "neutral" });
 ui.appVersion.textContent = `v${APP_VERSION}`;
 
@@ -194,8 +194,27 @@ function confirmDiscardChanges() {
 
 async function rememberRecent(kind, path) {
   if (!path) return;
-  try { await invoke("remember_recent", { kind, path }); }
+  try { await invoke("remember_recent", { kind, path }); await loadRecentDocuments(); }
   catch (error) { void reportAppError("recent-history", error); }
+}
+function renderRecentDocuments() {
+  ui.recentList.replaceChildren();
+  if (!state.recentDocuments.length) {
+    const empty = document.createElement("div"); empty.className = "recent-empty"; empty.textContent = "暂无最近打开的文档";
+    ui.recentList.append(empty); return;
+  }
+  state.recentDocuments.forEach(entry => {
+    const button = document.createElement("button"), name = document.createElement("span"), path = document.createElement("span");
+    button.type = "button"; button.className = "recent-file"; button.title = entry.path; button.setAttribute("aria-label", `打开最近文档：${fileName(entry.path)}`);
+    name.className = "recent-file-name"; name.textContent = fileName(entry.path);
+    path.className = "recent-file-path"; path.textContent = parentPath(entry.path);
+    button.append(name, path); button.classList.toggle("active", state.current?.path === normalisePath(entry.path));
+    button.addEventListener("click", () => openMarkdownPath(entry.path)); ui.recentList.append(button);
+  });
+}
+async function loadRecentDocuments() {
+  try { state.recentDocuments = await invoke("load_recent_documents"); renderRecentDocuments(); }
+  catch (error) { void reportAppError("recent-history-load", error); }
 }
 async function selectFolder() {
   const folderPath = await open({ directory: true, multiple: false, title: "选择 Markdown 文档目录" });
@@ -275,6 +294,7 @@ async function createUntitledDocument() {
 }
 
 function renderTree() {
+  renderRecentDocuments();
   ui.fileTree.replaceChildren();
   const renderNode = (node, container, workspace) => {
     [...node.folders.entries()].sort(([left], [right]) => left.localeCompare(right, "zh-CN")).forEach(([name, folder]) => {
@@ -992,4 +1012,5 @@ document.addEventListener("keydown", event => {
 });
 applyTheme(automaticTheme());
 scheduleAutomaticTheme();
+void loadRecentDocuments();
 void restoreWorkspaceSession();

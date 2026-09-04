@@ -476,6 +476,11 @@ fn remember_recent(app: AppHandle, kind: String, path: String) -> Result<(), Str
   refresh_application_menu(&app)
 }
 
+#[tauri::command]
+fn load_recent_documents(app: AppHandle) -> Vec<RecentEntry> {
+  read_recent_entries(&app).into_iter().filter(|entry| entry.kind == "file").collect()
+}
+
 fn main() {
   tauri::Builder::default()
     .plugin(tauri_plugin_dialog::init())
@@ -501,7 +506,7 @@ fn main() {
       });
       Ok(())
     })
-    .invoke_handler(tauri::generate_handler![load_markdown_folder, read_markdown_file, save_markdown_file, save_markdown_file_as, create_markdown_folder, create_markdown_file, read_markdown_image, save_markdown_image, import_markdown_image, paste_markdown_clipboard, report_error, copy_markdown_text, read_clipboard_text, remember_recent, load_workspace_session, save_workspace_session])
+    .invoke_handler(tauri::generate_handler![load_markdown_folder, read_markdown_file, save_markdown_file, save_markdown_file_as, create_markdown_folder, create_markdown_file, read_markdown_image, save_markdown_image, import_markdown_image, paste_markdown_clipboard, report_error, copy_markdown_text, read_clipboard_text, remember_recent, load_recent_documents, load_workspace_session, save_workspace_session])
     .build(tauri::generate_context!())
     .unwrap_or_else(|error| panic!("启动 {} 失败：{}", APP_NAME, error))
     .run(|app_handle, event| {

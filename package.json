@@ -5,7 +5,7 @@
     "identifier": "com.yoca.mdlite"
   },
   "private": true,
-  "version": "0.1.15",
+  "version": "0.1.16",
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1",

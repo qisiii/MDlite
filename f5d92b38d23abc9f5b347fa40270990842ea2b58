@@ -1,0 +1,29 @@
+index.html
+  5a40dfb277c05ae7 21-24
+src/style.css
+  5a40dfb277c05ae7 58-68
+src/main.js
+  5a40dfb277c05ae7 11-12,197,200-218,297,1015
+src-tauri/src/main.rs
+  5a40dfb277c05ae7 479-483,509
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.7",
+  "base_commit_sha": "f5d92b38d23abc9f5b347fa40270990842ea2b58",
+  "prompts": {
+    "5a40dfb277c05ae7": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "conv_20260904_mdlite_recent_documents",
+        "model": "gpt-5"
+      },
+      "human_author": "qisiii",
+      "messages": [],
+      "total_additions": 45,
+      "total_deletions": 4,
+      "accepted_lines": 45,
+      "overriden_lines": 0
+    }
+  }
+}

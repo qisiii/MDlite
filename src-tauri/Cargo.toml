@@ -1,0 +1,17 @@
+[package]
+name = "mdlite"
+version = "0.1.15"
+description = "Local Feishu-compatible Markdown editor and previewer"
+authors = ["YOCA"]
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+arboard = "3.6"
+base64 = "0.22"
+serde = { version = "1", features = ["derive"] }
+tauri = { version = "2", features = [] }
+tauri-plugin-clipboard-manager = "2"
+tauri-plugin-dialog = "2"

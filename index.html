@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>%APP_NAME%</title>
+  </head>
+  <body>
+    <div id="app">
+      <header class="topbar">
+        <div class="brand">%APP_NAME% <small><span id="appVersion"></span> · 本地编辑 · 实时预览</small></div>
+        <div class="mode-switch" aria-label="视图切换">
+          <button class="mode-icon" data-mode="edit" title="编辑模式" aria-label="编辑模式"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 16.5V20h3.5L18.4 9.1l-3.5-3.5L4 16.5Zm13.5-8.8 1.2-1.2a1.6 1.6 0 0 1 2.3 0l.5.5a1.6 1.6 0 0 1 0 2.3l-1.2 1.2-2.8-2.8Z" /></svg></button>
+          <button class="mode-icon active" data-mode="split" title="分栏模式" aria-label="分栏模式"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h16v16H4V4Zm2 2v12h5V6H6Zm7 0v12h5V6h-5Z" /></svg></button>
+          <button class="mode-icon" data-mode="preview" title="预览模式" aria-label="预览模式"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5c5.2 0 8.7 4.4 9.7 7-1 2.6-4.5 7-9.7 7S3.3 14.6 2.3 12C3.3 9.4 6.8 5 12 5Zm0 2.2A4.8 4.8 0 1 0 12 16.8 4.8 4.8 0 0 0 12 7.2Zm0 2A2.8 2.8 0 1 1 12 14.8 2.8 2.8 0 0 1 12 9.2Z" /></svg></button>
+        </div>
+        <span id="saveState">未打开文件</span>
+      </header>
+      <main id="workspace" data-mode="split">
+        <aside class="sidebar">
+          <div class="sidebar-title">文档目录 <span id="fileCount"></span></div>
+          <nav id="fileTree" aria-label="Markdown 文档目录"></nav>
+        </aside>
+        <section class="editor-pane">
+          <div class="pane-title"><span id="currentPath">请选择 Markdown 文件</span><span class="editor-hint">可粘贴或拖入图片</span><span id="dirtyMark"></span></div>
+          <section id="findReplaceModal" class="find-replace-bar" hidden role="region" aria-label="查找和替换">
+            <input id="findText" type="text" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="查找" />
+            <input id="replaceText" type="text" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="替换为" />
+            <button data-find-action="previous" title="上一处">↑</button><button data-find-action="next" title="下一处">↓</button><button data-find-action="replace" data-find-edit-only>替换</button><button data-find-action="replace-all" data-find-edit-only>全部替换</button><button data-find-action="close" title="关闭">×</button>
+            <span id="findStatus">在当前文件中查找。</span>
+          </section>
+          <pre id="editorHighlights" aria-hidden="true"></pre>
+          <textarea id="editor" spellcheck="false" autocapitalize="off" autocorrect="off" placeholder="从“打开文档目录”开始，选择一个 .md 文件。" disabled></textarea>
+        </section>
+        <section class="preview-pane">
+          <div class="pane-title">实时预览 <span id="previewState"></span></div>
+          <article id="preview" class="document"><div class="empty">预览会显示在这里。</div></article>
+        </section>
+      </main>
+    </div>
+    <section id="mermaidModal" hidden aria-modal="true" role="dialog" aria-label="全屏查看 Mermaid 图">
+      <div class="modal-dialog">
+        <header><strong>图表全屏查看</strong><span class="grow"></span><button data-modal-action="out">−</button><span id="modalZoom">100%</span><button data-modal-action="in">+</button><button data-modal-action="close">关闭</button></header>
+        <div id="modalCanvas"></div>
+      </div>
+    </section>
+    <section id="createModal" hidden aria-modal="true" role="dialog" aria-label="新建文件或文件夹">
+      <div class="find-dialog">
+        <header><strong id="createTitle">新建 Markdown 文档</strong><span class="grow"></span><button data-create-action="close">关闭</button></header>
+        <label>名称<input id="createName" type="text" autocomplete="off" placeholder="例如：接口说明" /></label>
+        <p id="createTarget"></p>
+        <footer><button data-create-action="close">取消</button><button data-create-action="confirm" class="primary">新建</button></footer>
+      </div>
+    </section>
+    <section id="reloadModal" hidden aria-modal="true" role="alertdialog" aria-labelledby="reloadTitle" aria-describedby="reloadMessage">
+      <div class="find-dialog reload-dialog">
+        <header><strong id="reloadTitle">文件已在磁盘中修改</strong></header>
+        <div class="reload-content">
+          <strong id="reloadFileName"></strong>
+          <p id="reloadMessage"></p>
+          <p class="reload-hint">“使用磁盘内容”会丢弃软件中的当前内容；“使用软件内容”会覆盖磁盘文件。</p>
+        </div>
+        <footer><button data-reload-action="disk">使用磁盘内容</button><button data-reload-action="software" class="primary">使用软件内容</button></footer>
+      </div>
+    </section>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>

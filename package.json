@@ -1,0 +1,31 @@
+{
+  "name": "mdlite",
+  "displayName": "MDLite",
+  "tauri": {
+    "identifier": "com.yoca.mdlite"
+  },
+  "private": true,
+  "version": "0.1.15",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "sync-version": "node scripts/sync-version.mjs",
+    "build": "npm run sync-version && vite build",
+    "tauri": "npm run sync-version && tauri",
+    "release": "node scripts/release.mjs",
+    "release:patch": "node scripts/release.mjs patch",
+    "release:minor": "node scripts/release.mjs minor",
+    "release:major": "node scripts/release.mjs major"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.0.0",
+    "@tauri-apps/plugin-clipboard-manager": "^2.3.3",
+    "@tauri-apps/plugin-dialog": "^2.0.0",
+    "marked": "^15.0.0",
+    "mermaid": "^11.0.0"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.0.0",
+    "vite": "^6.0.0"
+  }
+}

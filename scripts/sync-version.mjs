@@ -1,6 +1,7 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 
 const packagePath = new URL("../package.json", import.meta.url);
+const packageLockPath = new URL("../package-lock.json", import.meta.url);
 const cargoPath = new URL("../src-tauri/Cargo.toml", import.meta.url);
 const tauriPath = new URL("../src-tauri/tauri.conf.json", import.meta.url);
 const rustConfigPath = new URL("../src-tauri/src/app_config.rs", import.meta.url);
@@ -12,6 +13,12 @@ if (!name || !displayName || !version || !identifier) throw new Error("package.j
 function writeWhenChanged(path, next) {
   if (!existsSync(path) || readFileSync(path, "utf8") !== next) writeFileSync(path, next);
 }
+
+const packageLock = JSON.parse(readFileSync(packageLockPath, "utf8"));
+if (!packageLock.packages?.[""]) throw new Error("package-lock.json 缺少根包信息");
+packageLock.version = version;
+packageLock.packages[""].version = version;
+writeWhenChanged(packageLockPath, `${JSON.stringify(packageLock, null, 2)}\n`);
 
 const cargo = readFileSync(cargoPath, "utf8");
 if (!/^version = ".*"$/m.test(cargo)) throw new Error("未能在 Cargo.toml 中找到版本号");

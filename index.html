@@ -33,11 +33,19 @@
           <textarea id="editor" spellcheck="false" autocapitalize="off" autocorrect="off" placeholder="从“打开文档目录”开始，选择一个 .md 文件。" disabled></textarea>
         </section>
         <section class="preview-pane">
-          <div class="pane-title">实时预览 <span id="previewState"></span></div>
-          <article id="preview" class="document"><div class="empty">预览会显示在这里。</div></article>
+          <div class="outline-layer">
+            <aside class="outline-sidebar" aria-label="文档目录">
+              <nav id="documentOutline" aria-label="当前文档标题目录"><div class="outline-empty">当前文档没有标题。</div></nav>
+            </aside>
+          </div>
+          <div class="preview-content">
+            <div class="pane-title"><button id="outlineToggle" class="outline-toggle" type="button" title="收起目录" aria-label="收起目录" aria-expanded="true"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m14 5-7 7 7 7M20 5l-7 7 7 7"/></svg></button><span>实时预览</span><span id="previewState"></span></div>
+            <article id="preview" class="document"><div class="empty">预览会显示在这里。</div></article>
+          </div>
         </section>
       </main>
     </div>
+    <button id="themeToggle" class="theme-toggle" type="button" title="切换到夜间模式" aria-label="切换到夜间模式" aria-pressed="false">☾</button>
     <section id="mermaidModal" hidden aria-modal="true" role="dialog" aria-label="全屏查看 Mermaid 图">
       <div class="modal-dialog">
         <header><strong>图表全屏查看</strong><span class="grow"></span><button data-modal-action="out">−</button><span id="modalZoom">100%</span><button data-modal-action="in">+</button><button data-modal-action="close">关闭</button></header>

@@ -8,8 +8,8 @@ import "./style.css";
 
 const APP_VERSION = __APP_VERSION__;
 const APP_NAME = __APP_NAME__;
-const ui = Object.fromEntries(["appVersion", "saveState", "fileTree", "fileCount", "editor", "editorHighlights", "currentPath", "dirtyMark", "preview", "previewState", "workspace", "mermaidModal", "modalCanvas", "modalZoom", "findReplaceModal", "findText", "replaceText", "findStatus", "createModal", "createTitle", "createName", "createTarget", "reloadModal", "reloadFileName", "reloadMessage"].map(id => [id, document.getElementById(id)]));
-const state = { docs: new Map(), folders: new Map(), root: null, selectedFolder: null, expandedFolders: new Set(), current: null, dirty: false, mermaidSequence: 0, fullscreen: null, createKind: null, pasteShortcutToken: null, findPasteToken: null, previewMatch: null, history: [], historyIndex: -1, historyApplying: false, reloadCheckPromise: null, reloadConflict: null };
+const ui = Object.fromEntries(["appVersion", "saveState", "fileTree", "fileCount", "editor", "editorHighlights", "currentPath", "dirtyMark", "preview", "previewState", "workspace", "documentOutline", "outlineToggle", "themeToggle", "mermaidModal", "modalCanvas", "modalZoom", "findReplaceModal", "findText", "replaceText", "findStatus", "createModal", "createTitle", "createName", "createTarget", "reloadModal", "reloadFileName", "reloadMessage"].map(id => [id, document.getElementById(id)]));
+const state = { roots: new Map(), docs: new Map(), selectedFolder: null, activeRoot: null, expandedFolders: new Set(), current: null, dirty: false, mermaidSequence: 0, fullscreen: null, createKind: null, pasteShortcutToken: null, findPasteToken: null, previewMatch: null, history: [], historyIndex: -1, historyApplying: false, reloadCheckPromise: null, reloadConflict: null, restoringSession: false, sessionSaveQueue: Promise.resolve(), themeTimer: null };
 mermaid.initialize({ startOnLoad: false, securityLevel: "strict", theme: "neutral" });
 ui.appVersion.textContent = `v${APP_VERSION}`;
 
@@ -37,6 +37,29 @@ window.addEventListener("unhandledrejection", event => { void reportAppError("un
 
 function setSaveState(text, kind = "") { ui.saveState.textContent = text; ui.saveState.className = kind; }
 function setDirty(value) { state.dirty = value; ui.dirtyMark.textContent = value ? "● 未保存" : ""; }
+function automaticTheme(now = new Date()) { const hour = now.getHours(); return hour >= 7 && hour < 18 ? "light" : "dark"; }
+function configureMermaidTheme(theme) {
+  mermaid.initialize({ startOnLoad: false, securityLevel: "strict", theme: theme === "dark" ? "dark" : "neutral" });
+}
+function applyTheme(theme) {
+  const changed = document.documentElement.dataset.theme !== theme;
+  const dark = theme === "dark";
+  document.documentElement.dataset.theme = theme;
+  configureMermaidTheme(theme);
+  ui.themeToggle.textContent = dark ? "☀" : "☾";
+  ui.themeToggle.title = dark ? "切换到日间模式" : "切换到夜间模式";
+  ui.themeToggle.setAttribute("aria-label", ui.themeToggle.title);
+  ui.themeToggle.setAttribute("aria-pressed", String(dark));
+  if (changed && state.current && !state.fullscreen) void renderPreview();
+}
+function scheduleAutomaticTheme() {
+  window.clearTimeout(state.themeTimer);
+  const now = new Date(), next = new Date(now);
+  if (now.getHours() < 7) next.setHours(7, 0, 0, 0);
+  else if (now.getHours() < 18) next.setHours(18, 0, 0, 0);
+  else { next.setDate(next.getDate() + 1); next.setHours(7, 0, 0, 0); }
+  state.themeTimer = window.setTimeout(() => { applyTheme(automaticTheme()); scheduleAutomaticTheme(); }, Math.max(0, next.getTime() - now.getTime()) + 50);
+}
 function resetHistory(content) {
   state.history = [{ content, start: 0, end: 0 }];
   state.historyIndex = 0;
@@ -73,11 +96,94 @@ function redoEditor() {
 function normalisePath(path) { return path.replaceAll("\\", "/"); }
 function fileName(path) { return normalisePath(path).split("/").pop(); }
 function parentPath(path) { return normalisePath(path).split("/").slice(0, -1).join("/"); }
-function relativeToRoot(path) { return normalisePath(path).slice(normalisePath(state.root).length).replace(/^\//, ""); }
-function openParentFolders(path) {
-  if (!state.root) return;
-  const parts = relativeToRoot(path).split("/").filter(Boolean); parts.pop();
-  let current = normalisePath(state.root);
+function relativeToRoot(path, rootPath) {
+  const normalPath = normalisePath(path), normalRoot = normalisePath(rootPath || "");
+  if (!normalRoot || normalPath === normalRoot) return "";
+  return normalPath.startsWith(`${normalRoot}/`) ? normalPath.slice(normalRoot.length + 1) : normalPath;
+}
+function workspaceForPath(path) {
+  const normalPath = normalisePath(path);
+  let match = null;
+  state.roots.forEach(workspace => {
+    const rootPath = normalisePath(workspace.path);
+    if ((normalPath === rootPath || normalPath.startsWith(`${rootPath}/`)) && (!match || rootPath.length > match.path.length)) match = workspace;
+  });
+  return match;
+}
+function discardWorkspace(rootPath) {
+  const path = normalisePath(rootPath), workspace = state.roots.get(path);
+  if (!workspace) return;
+  state.roots.delete(path);
+  workspace.docs.forEach((_, documentPath) => {
+    if (![...state.roots.values()].some(item => item.docs.has(documentPath))) state.docs.delete(documentPath);
+  });
+  if (state.activeRoot === path) state.activeRoot = null;
+  if (state.selectedFolder === path || state.selectedFolder?.startsWith(`${path}/`)) state.selectedFolder = null;
+}
+function createWorkspace(rootPath, kind) {
+  const path = normalisePath(rootPath);
+  discardWorkspace(path);
+  const workspace = { path, kind, docs: new Map(), folders: new Map(), closedDocuments: new Set() };
+  state.roots.set(path, workspace);
+  return workspace;
+}
+function addDocument(workspace, document) {
+  const path = normalisePath(document.path);
+  const current = state.docs.get(path);
+  const entry = current ? Object.assign(current, { ...document, path }) : { ...document, path };
+  state.docs.set(path, entry); workspace.docs.set(path, entry); workspace.closedDocuments.delete(path);
+  return entry;
+}
+function addFolder(workspace, folder) {
+  const path = normalisePath(folder.path);
+  workspace.folders.set(path, { ...folder, path });
+}
+function workspaceSessionSnapshot() {
+  return {
+    roots: [...state.roots.values()].map(workspace => ({ path: workspace.path, kind: workspace.kind, documents: workspace.kind === "files" ? [...workspace.docs.keys()] : [], closedDocuments: [...workspace.closedDocuments] })),
+    expandedFolders: [...state.expandedFolders], activeRoot: state.activeRoot, currentPath: state.current?.path || null, selectedFolder: state.selectedFolder,
+  };
+}
+function persistWorkspaceSession() {
+  if (state.restoringSession) return;
+  const session = workspaceSessionSnapshot();
+  state.sessionSaveQueue = state.sessionSaveQueue.catch(() => {}).then(() => invoke("save_workspace_session", { session })).catch(error => { void reportAppError("workspace-session-save", error); });
+}
+async function restoreWorkspaceSession() {
+  let session;
+  try { session = await invoke("load_workspace_session"); }
+  catch (error) { void reportAppError("workspace-session-load", error); return; }
+  if (!session?.roots?.length) return;
+  state.restoringSession = true;
+  try {
+    for (const root of session.roots) {
+      if (root.kind === "folder") await openMarkdownFolder(root.path, { selectCurrent: false, remember: false });
+      else if (root.kind === "files") for (const path of root.documents || []) await openMarkdownPath(path, { selectCurrent: false, remember: false });
+      const workspace = state.roots.get(normalisePath(root.path));
+      for (const path of root.closedDocuments || []) if (workspace?.docs.has(normalisePath(path))) removeDocumentFromWorkspace(workspace, normalisePath(path));
+    }
+    state.expandedFolders = new Set((session.expandedFolders || []).filter(path => workspaceForPath(path)));
+    const root = session.activeRoot && state.roots.get(normalisePath(session.activeRoot));
+    const current = session.currentPath && state.docs.get(normalisePath(session.currentPath));
+    if (current) await selectDocument(current.path, root?.path || workspaceForPath(current.path)?.path);
+    else {
+      const first = [...state.docs.values()][0];
+      if (first) await selectDocument(first.path, workspaceForPath(first.path)?.path);
+    }
+    if (session.selectedFolder && workspaceForPath(session.selectedFolder)) state.selectedFolder = normalisePath(session.selectedFolder);
+    renderTree();
+    if (state.roots.size) setSaveState(`已恢复 ${state.roots.size} 个文档目录`, "ok");
+  } finally {
+    state.restoringSession = false;
+    persistWorkspaceSession();
+  }
+}
+function openParentFolders(path, rootPath) {
+  const root = normalisePath(rootPath || workspaceForPath(path)?.path || "");
+  if (!root) return;
+  const parts = relativeToRoot(path, root).split("/").filter(Boolean); parts.pop();
+  state.expandedFolders.add(root);
+  let current = root;
   parts.forEach(part => { current += `/${part}`; state.expandedFolders.add(current); });
 }
 function confirmDiscardChanges() {
@@ -96,18 +202,19 @@ async function selectFolder() {
   if (!folderPath) return;
   await openMarkdownFolder(folderPath);
 }
-async function openMarkdownFolder(folderPath) {
+async function openMarkdownFolder(folderPath, { selectCurrent = true, remember = true } = {}) {
   if (!confirmDiscardChanges()) return;
   try {
     setSaveState("正在读取目录…");
     const workspace = await invoke("load_markdown_folder", { folderPath });
-    state.root = normalisePath(folderPath); state.selectedFolder = state.root; state.expandedFolders.clear();
-    state.docs = new Map(workspace.documents.map(doc => [normalisePath(doc.path), { ...doc, path: normalisePath(doc.path) }]));
-    state.folders = new Map(workspace.folders.map(folder => [normalisePath(folder.path), { ...folder, path: normalisePath(folder.path) }]));
+    const rootPath = normalisePath(folderPath), root = createWorkspace(rootPath, "folder");
+    workspace.documents.forEach(document => addDocument(root, document));
+    workspace.folders.forEach(folder => addFolder(root, folder));
+    state.selectedFolder = rootPath; state.expandedFolders.add(rootPath);
     renderTree();
-    const first = [...state.docs.values()][0];
-    if (first) await selectDocument(first.path);
-    void rememberRecent("folder", folderPath);
+    const first = [...root.docs.values()][0];
+    if (first && selectCurrent) await selectDocument(first.path, rootPath);
+    if (remember) void rememberRecent("folder", folderPath);
     setSaveState(`已打开 ${workspace.documents.length} 个文件`, "ok");
   } catch (error) { void reportAppError("folder-open", error); setSaveState(`读取目录失败：${error}`, "error"); }
 }
@@ -118,29 +225,38 @@ async function selectFile() {
   await openMarkdownPath(path);
 }
 
-async function openMarkdownPath(path) {
+async function openMarkdownPath(path, { selectCurrent = true, remember = true } = {}) {
   if (!confirmDiscardChanges()) return;
   try {
-    const doc = await invoke("read_markdown_file", { path });
-    state.root = parentPath(doc.path); state.selectedFolder = state.root; state.expandedFolders.clear(); state.folders = new Map();
-    state.docs = new Map([[normalisePath(doc.path), { ...doc, path: normalisePath(doc.path) }]]);
-    state.current = null; setDirty(false);
-    renderTree(); await selectDocument(doc.path); setSaveState("文件已打开", "ok");
+    const document = await invoke("read_markdown_file", { path });
+    const rootPath = workspaceForPath(document.path)?.path || parentPath(document.path);
+    const root = state.roots.get(normalisePath(rootPath)) || createWorkspace(rootPath, "files");
+    addDocument(root, document);
+    state.selectedFolder = parentPath(document.path); openParentFolders(document.path, root.path);
+    renderTree(); if (selectCurrent) await selectDocument(document.path, root.path); else if (remember) void rememberRecent("file", document.path); setSaveState("文件已打开", "ok");
   } catch (error) { void reportAppError("file-open", error); setSaveState(`打开失败：${error}`, "error"); }
 }
 
-async function selectDocument(path) {
+async function selectDocument(path, rootPath = null) {
   const doc = state.docs.get(normalisePath(path));
   if (!doc) return;
-  if (state.current?.path === doc.path) return;
+  const root = rootPath ? state.roots.get(normalisePath(rootPath)) : workspaceForPath(doc.path);
+  if (state.current?.path === doc.path) {
+    state.activeRoot = root?.path || null;
+    state.selectedFolder = parentPath(doc.path); openParentFolders(doc.path, root?.path);
+    ui.currentPath.textContent = root ? relativeToRoot(doc.path, root.path) || fileName(doc.path) : doc.relativePath || fileName(doc.path);
+    renderTree();
+    return;
+  }
   if (!confirmDiscardChanges()) return;
   state.current = doc;
-  state.selectedFolder = parentPath(doc.path); openParentFolders(doc.path);
+  state.activeRoot = root?.path || null;
+  state.selectedFolder = parentPath(doc.path); openParentFolders(doc.path, root?.path);
   ui.editor.value = doc.content;
   renderEditorHighlights();
   resetHistory(doc.content);
   ui.editor.disabled = false;
-  ui.currentPath.textContent = doc.relativePath || fileName(doc.path);
+  ui.currentPath.textContent = root ? relativeToRoot(doc.path, root.path) || fileName(doc.path) : doc.relativePath || fileName(doc.path);
   setDirty(false); renderTree(); await renderPreview();
   void rememberRecent("file", doc.path);
 }
@@ -160,22 +276,7 @@ async function createUntitledDocument() {
 
 function renderTree() {
   ui.fileTree.replaceChildren();
-  const root = { path: state.root, folders: new Map(), files: [] };
-  const ensureFolder = (relativePath, absolutePath) => {
-    let node = root, currentPath = normalisePath(state.root || "");
-    relativePath.split("/").filter(Boolean).forEach(part => {
-      currentPath = `${currentPath}/${part}`;
-      if (!node.folders.has(part)) node.folders.set(part, { path: currentPath, folders: new Map(), files: [] });
-      node = node.folders.get(part); if (absolutePath && currentPath === absolutePath) node.path = absolutePath;
-    });
-    return node;
-  };
-  [...state.folders.values()].forEach(folder => ensureFolder(folder.relativePath || relativeToRoot(folder.path), folder.path));
-  [...state.docs.values()].forEach(doc => {
-    const parts = (doc.relativePath || relativeToRoot(doc.path)).split("/");
-    const folder = ensureFolder(parts.slice(0, -1).join("/")); folder.files.push(doc);
-  });
-  const renderNode = (node, container) => {
+  const renderNode = (node, container, workspace) => {
     [...node.folders.entries()].sort(([left], [right]) => left.localeCompare(right, "zh-CN")).forEach(([name, folder]) => {
       const details = document.createElement("details"); details.className = "tree-folder"; details.open = state.expandedFolders.has(folder.path);
       const summary = document.createElement("summary"); summary.innerHTML = `<span class="folder-chevron"></span><svg class="folder-icon" viewBox="0 0 24 24" aria-hidden="true"><path fill="#8ed0f5" d="M2.5 7.3A2.3 2.3 0 0 1 4.8 5h5l1.7 2h7.7a2.3 2.3 0 0 1 2.3 2.3v8.9a2.3 2.3 0 0 1-2.3 2.3H4.8a2.3 2.3 0 0 1-2.3-2.3V7.3Z"/><path fill="#4ca9df" d="M2.5 9.3h19v8.9a2.3 2.3 0 0 1-2.3 2.3H4.8a2.3 2.3 0 0 1-2.3-2.3V9.3Z"/></svg><span class="folder-name"></span>`; summary.querySelector(".folder-name").textContent = name; summary.title = folder.path;
@@ -184,17 +285,47 @@ function renderTree() {
         state.selectedFolder = folder.path;
         ui.fileTree.querySelectorAll(".tree-folder summary.selected").forEach(item => item.classList.remove("selected"));
         summary.classList.add("selected");
+        persistWorkspaceSession();
       });
-      details.addEventListener("toggle", () => { if (details.open) state.expandedFolders.add(folder.path); else state.expandedFolders.delete(folder.path); });
-      const children = document.createElement("div"); children.className = "tree-children"; renderNode(folder, children);
+      details.addEventListener("toggle", () => { if (details.open) state.expandedFolders.add(folder.path); else state.expandedFolders.delete(folder.path); persistWorkspaceSession(); });
+      const children = document.createElement("div"); children.className = "tree-children"; renderNode(folder, children, workspace);
       details.append(summary, children); container.append(details);
     });
-    node.files.sort((left, right) => (left.relativePath || left.path).localeCompare(right.relativePath || right.path, "zh-CN")).forEach(doc => {
+    node.files.sort((left, right) => relativeToRoot(left.path, workspace.path).localeCompare(relativeToRoot(right.path, workspace.path), "zh-CN")).forEach(doc => {
+      const row = document.createElement("div"); row.className = "tree-file-row";
       const button = document.createElement("button"); button.type = "button"; button.className = "tree-file"; button.innerHTML = `<svg class="file-icon" viewBox="0 0 24 24" aria-hidden="true"><path fill="#fff" stroke="#b5becb" d="M5 2.5h9l5 5V21.5H5z"/><path fill="#dce3ec" d="M14 2.5v5h5z"/><path stroke="#5e6d80" stroke-width="1.5" stroke-linecap="round" d="M8 12h8M8 15h8M8 18h5"/></svg><span class="file-name"></span>`; button.querySelector(".file-name").textContent = fileName(doc.path); button.title = doc.path;
-      if (state.current?.path === doc.path) button.classList.add("active"); button.addEventListener("click", () => selectDocument(doc.path)); container.append(button);
+      if (state.current?.path === doc.path && state.activeRoot === workspace.path) { row.classList.add("active"); button.classList.add("active"); } button.addEventListener("click", () => selectDocument(doc.path, workspace.path));
+      const close = document.createElement("button"); close.type = "button"; close.className = "tree-close"; close.textContent = "×"; close.title = `关闭 ${fileName(doc.path)}`; close.setAttribute("aria-label", close.title); close.addEventListener("click", event => { event.stopPropagation(); closeDocument(doc.path, workspace.path); });
+      row.append(button, close); container.append(row);
     });
   };
-  renderNode(root, ui.fileTree); ui.fileCount.textContent = state.docs.size ? `(${state.docs.size})` : "";
+  state.roots.forEach(workspace => {
+    const root = { path: workspace.path, folders: new Map(), files: [] };
+    const ensureFolder = (relativePath, absolutePath) => {
+      let node = root, currentPath = workspace.path;
+      relativePath.split("/").filter(Boolean).forEach(part => {
+        currentPath = `${currentPath}/${part}`;
+        if (!node.folders.has(part)) node.folders.set(part, { path: currentPath, folders: new Map(), files: [] });
+        node = node.folders.get(part); if (absolutePath && currentPath === absolutePath) node.path = absolutePath;
+      });
+      return node;
+    };
+    workspace.folders.forEach(folder => ensureFolder(relativeToRoot(folder.path, workspace.path), folder.path));
+    workspace.docs.forEach(doc => {
+      const parts = relativeToRoot(doc.path, workspace.path).split("/");
+      ensureFolder(parts.slice(0, -1).join("/")).files.push(doc);
+    });
+    const details = document.createElement("details"); details.className = "tree-folder tree-root"; details.open = state.expandedFolders.has(workspace.path);
+    const summary = document.createElement("summary"); summary.innerHTML = `<span class="folder-chevron"></span><svg class="folder-icon" viewBox="0 0 24 24" aria-hidden="true"><path fill="#8ed0f5" d="M2.5 7.3A2.3 2.3 0 0 1 4.8 5h5l1.7 2h7.7a2.3 2.3 0 0 1 2.3 2.3v8.9a2.3 2.3 0 0 1-2.3 2.3H4.8a2.3 2.3 0 0 1-2.3-2.3V7.3Z"/><path fill="#4ca9df" d="M2.5 9.3h19v8.9a2.3 2.3 0 0 1-2.3 2.3H4.8a2.3 2.3 0 0 1-2.3 2.3V9.3Z"/></svg><span class="folder-name"></span>`; summary.querySelector(".folder-name").textContent = fileName(workspace.path) || workspace.path; summary.title = workspace.path;
+    const close = document.createElement("button"); close.type = "button"; close.className = "tree-close"; close.textContent = "×"; close.title = `关闭 ${fileName(workspace.path) || workspace.path}`; close.setAttribute("aria-label", close.title); close.addEventListener("click", event => { event.preventDefault(); event.stopPropagation(); closeWorkspace(workspace.path); }); summary.append(close);
+    if (state.selectedFolder === workspace.path) summary.classList.add("selected");
+    summary.addEventListener("click", () => { state.selectedFolder = workspace.path; ui.fileTree.querySelectorAll(".tree-folder summary.selected").forEach(item => item.classList.remove("selected")); summary.classList.add("selected"); persistWorkspaceSession(); });
+    details.addEventListener("toggle", () => { if (details.open) state.expandedFolders.add(workspace.path); else state.expandedFolders.delete(workspace.path); persistWorkspaceSession(); });
+    const children = document.createElement("div"); children.className = "tree-children"; renderNode(root, children, workspace);
+    details.append(summary, children); ui.fileTree.append(details);
+  });
+  ui.fileCount.textContent = state.docs.size ? `(${state.docs.size})` : "";
+  persistWorkspaceSession();
 }
 
 function protectFences(source) {
@@ -233,6 +364,39 @@ function addHeadingIds(root) {
     used.set(base, index + 1); heading.id = index ? `${base}-${index}` : base;
   });
 }
+function renderDocumentOutline() {
+  const headings = [...ui.preview.querySelectorAll("h1,h2,h3,h4,h5,h6")];
+  ui.documentOutline.replaceChildren();
+  if (!headings.length) {
+    const empty = document.createElement("div"); empty.className = "outline-empty"; empty.textContent = "当前文档没有标题。";
+    ui.documentOutline.append(empty);
+    return;
+  }
+  const baseLevel = Math.min(...headings.map(heading => Number(heading.tagName.slice(1))));
+  headings.forEach(heading => {
+    const button = document.createElement("button");
+    button.type = "button"; button.className = "outline-item";
+    button.style.setProperty("--outline-depth", String(Math.max(0, Number(heading.tagName.slice(1)) - baseLevel)));
+    button.textContent = heading.textContent.trim() || "未命名标题";
+    button.title = button.textContent;
+    button.addEventListener("click", () => {
+      heading.scrollIntoView({ behavior: "smooth", block: "start" });
+      ui.documentOutline.querySelectorAll(".outline-item.active").forEach(item => item.classList.remove("active"));
+      button.classList.add("active");
+    });
+    ui.documentOutline.append(button);
+  });
+}
+function setDocumentOutlineCollapsed(collapsed) {
+  const pane = ui.preview.closest(".preview-pane");
+  pane.classList.toggle("outline-collapsed", collapsed);
+  ui.outlineToggle.innerHTML = collapsed
+    ? '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"/></svg>'
+    : '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m14 5-7 7 7 7M20 5l-7 7 7 7"/></svg>';
+  ui.outlineToggle.title = collapsed ? "展开目录" : "收起目录";
+  ui.outlineToggle.setAttribute("aria-label", ui.outlineToggle.title);
+  ui.outlineToggle.setAttribute("aria-expanded", String(!collapsed));
+}
 async function hydrateLocalImages() {
   if (!state.current?.path) return;
   const images = [...ui.preview.querySelectorAll("img[src]")];
@@ -257,7 +421,7 @@ async function renderPreview() {
   ui.previewState.textContent = "渲染中…";
   const { text, blocks } = protectFences(ui.editor.value);
   ui.preview.innerHTML = restoreBlocks(marked.parse(text.replace(/<table\b/gi, '<table data-feishu-table'), { gfm: true, breaks: true }), blocks);
-  clearPreviewFindHighlights(); sanitize(ui.preview); processRawCells(ui.preview, blocks); sanitize(ui.preview); addHeadingIds(ui.preview); wrapTables(ui.preview); state.previewMatch = null; await hydrateLocalImages();
+  clearPreviewFindHighlights(); sanitize(ui.preview); processRawCells(ui.preview, blocks); sanitize(ui.preview); addHeadingIds(ui.preview); renderDocumentOutline(); wrapTables(ui.preview); state.previewMatch = null; await hydrateLocalImages();
   const diagrams = [...ui.preview.querySelectorAll(".mermaid")];
   if (diagrams.length) { diagrams.forEach(node => node.id = `mermaid-${++state.mermaidSequence}`); try { await mermaid.run({ nodes: diagrams }); } catch (error) { void reportAppError("mermaid-render", error); ui.previewState.textContent = "部分 Mermaid 图显示源码"; return; } }
   ui.previewState.textContent = "";
@@ -352,10 +516,9 @@ async function saveCurrent() {
       if (!destination) { setSaveState("已取消保存", ""); return false; }
       const document = await invoke("save_markdown_file_as", { path: destination, content: ui.editor.value });
       const savedPath = normalisePath(document.path);
-      const inCurrentRoot = state.root && (savedPath === normalisePath(state.root) || savedPath.startsWith(`${normalisePath(state.root)}/`));
-      if (!inCurrentRoot) { state.root = parentPath(savedPath); state.selectedFolder = state.root; state.expandedFolders.clear(); state.folders = new Map(); state.docs = new Map(); }
-      state.current = { ...document, path: savedPath, relativePath: relativeToRoot(savedPath) || fileName(savedPath) };
-      state.docs.set(savedPath, state.current); renderTree();
+      const root = workspaceForPath(savedPath) || createWorkspace(parentPath(savedPath), "files");
+      state.current = addDocument(root, document);
+      state.activeRoot = root.path; state.selectedFolder = parentPath(savedPath); openParentFolders(savedPath, root.path); renderTree();
     } else {
       await invoke("save_markdown_file", { path: state.current.path, content: ui.editor.value });
       state.current.content = ui.editor.value;
@@ -365,12 +528,52 @@ async function saveCurrent() {
 }
 async function closeCurrentDocument() {
   if (!state.current) return;
-  if (!confirmDiscardChanges()) return;
-  const closingPath = state.current.path; state.docs.delete(closingPath); state.current = null; setDirty(false);
-  const next = [...state.docs.values()][0];
-  if (next) { await selectDocument(next.path); return; }
+  if (!state.current.path) {
+    if (!confirmDiscardChanges()) return;
+    state.current = null; state.activeRoot = null; setDirty(false); clearDocumentView("文档已关闭"); return;
+  }
+  await closeDocument(state.current.path, state.activeRoot || workspaceForPath(state.current.path)?.path);
+}
+function removeDocumentFromWorkspace(workspace, path) {
+  workspace.docs.delete(path);
+  if (workspace.kind === "folder") workspace.closedDocuments.add(path);
+  if (![...state.roots.values()].some(item => item.docs.has(path))) state.docs.delete(path);
+  if (workspace.kind === "files" && workspace.docs.size === 0) discardWorkspace(workspace.path);
+}
+function firstOpenDocument() {
+  for (const workspace of state.roots.values()) {
+    const document = [...workspace.docs.values()][0];
+    if (document) return { document, workspace };
+  }
+  return null;
+}
+function clearDocumentView(message) {
   ui.editor.value = ""; renderEditorHighlights(); ui.editor.disabled = true; ui.currentPath.textContent = "请选择 Markdown 文件";
-  ui.preview.innerHTML = '<div class="empty">预览会显示在这里。</div>'; ui.previewState.textContent = ""; renderTree(); setSaveState("文档已关闭", "ok");
+  ui.preview.innerHTML = '<div class="empty">预览会显示在这里。</div>'; renderDocumentOutline(); ui.previewState.textContent = ""; renderTree(); setSaveState(message, "ok");
+}
+async function closeDocument(path, rootPath) {
+  const documentPath = normalisePath(path), workspace = rootPath && state.roots.get(normalisePath(rootPath));
+  if (!workspace?.docs.has(documentPath)) return;
+  const closingCurrent = state.current?.path === documentPath && state.activeRoot === workspace.path;
+  if (closingCurrent && !confirmDiscardChanges()) return;
+  removeDocumentFromWorkspace(workspace, documentPath);
+  if (!closingCurrent) { renderTree(); setSaveState("文档已关闭", "ok"); return; }
+  state.current = null; state.activeRoot = null; setDirty(false);
+  const next = firstOpenDocument();
+  if (next) { await selectDocument(next.document.path, next.workspace.path); setSaveState("文档已关闭", "ok"); return; }
+  clearDocumentView("文档已关闭");
+}
+async function closeWorkspace(rootPath) {
+  const path = normalisePath(rootPath), workspace = state.roots.get(path);
+  if (!workspace) return;
+  const closingCurrent = state.activeRoot === path;
+  if (closingCurrent && !confirmDiscardChanges()) return;
+  discardWorkspace(path);
+  if (!closingCurrent) { renderTree(); setSaveState("文档目录已关闭", "ok"); return; }
+  state.current = null; state.activeRoot = null; setDirty(false);
+  const next = firstOpenDocument();
+  if (next) { await selectDocument(next.document.path, next.workspace.path); setSaveState("文档目录已关闭", "ok"); return; }
+  clearDocumentView("文档目录已关闭");
 }
 
 function isPreviewMode() { return ui.workspace.dataset.mode === "preview"; }
@@ -392,10 +595,11 @@ function openFindReplace() {
 }
 function closeFindReplace() { clearPreviewFindHighlights(); ui.findReplaceModal.hidden = true; renderEditorHighlights(); if (!isPreviewMode()) ui.editor.focus(); }
 function openCreate(kind) {
-  if (!state.root || !state.selectedFolder) { setSaveState("请先打开一个 Markdown 文档目录", "error"); return; }
+  const workspace = state.selectedFolder && workspaceForPath(state.selectedFolder);
+  if (!workspace || !state.selectedFolder) { setSaveState("请先打开一个 Markdown 文档目录", "error"); return; }
   state.createKind = kind; ui.createTitle.textContent = "新建文件夹";
   ui.createName.placeholder = "例如：接口文档";
-  const relative = relativeToRoot(state.selectedFolder); ui.createTarget.textContent = `将在 ${relative ? relative : "当前文档根目录"} 中创建。`;
+  const relative = relativeToRoot(state.selectedFolder, workspace.path); ui.createTarget.textContent = `将在 ${relative ? relative : "当前文档根目录"} 中创建。`;
   ui.createName.value = ""; ui.createModal.hidden = false; ui.createName.focus();
 }
 function closeCreate() { ui.createModal.hidden = true; state.createKind = null; }
@@ -405,7 +609,9 @@ async function createEntry() {
   try {
     if (state.createKind === "folder") {
       const folder = await invoke("create_markdown_folder", { parentPath, name });
-      const path = normalisePath(folder.path); state.folders.set(path, { ...folder, path, relativePath: relativeToRoot(path) }); state.expandedFolders.add(parentPath); state.selectedFolder = path; renderTree(); setSaveState("文件夹已创建", "ok");
+      const workspace = workspaceForPath(parentPath);
+      if (!workspace) throw new Error("未找到创建位置所属的文档目录");
+      const path = normalisePath(folder.path); addFolder(workspace, folder); state.expandedFolders.add(parentPath); state.selectedFolder = path; renderTree(); setSaveState("文件夹已创建", "ok");
     }
     closeCreate();
   } catch (error) { void reportAppError("create-entry", error); ui.createTarget.textContent = `创建失败：${error}`; }
@@ -602,13 +808,25 @@ function openFullscreen(box) {
   state.fullscreen = { diagram, parent: diagram.parentNode, next: diagram.nextSibling, width, height, zoom: 1 };
   ui.modalCanvas.append(diagram); ui.mermaidModal.hidden = false; document.body.classList.add("modal-open"); applyFullscreenZoom(1);
 }
-function applyFullscreenZoom(next) {
+function applyFullscreenZoom(next, clientX = null, clientY = null) {
   if (!state.fullscreen) return; const zoom = Math.max(.5, Math.min(4, next)), svg = ui.modalCanvas.querySelector("svg");
+  const diagram = ui.modalCanvas.querySelector(".mermaid"), previousZoom = state.fullscreen.zoom, previousBounds = diagram?.getBoundingClientRect();
+  const localX = previousBounds && clientX !== null ? (clientX - previousBounds.left) / previousZoom : null;
+  const localY = previousBounds && clientY !== null ? (clientY - previousBounds.top) / previousZoom : null;
   state.fullscreen.zoom = zoom; svg.style.maxWidth = "none"; svg.style.width = `${Math.round(state.fullscreen.width * zoom)}px`; svg.style.height = `${Math.round(state.fullscreen.height * zoom)}px`; ui.modalZoom.textContent = `${Math.round(zoom * 100)}%`;
+  if (localX === null || localY === null) return;
+  window.requestAnimationFrame(() => {
+    if (!state.fullscreen || state.fullscreen.zoom !== zoom || !diagram) return;
+    const bounds = diagram.getBoundingClientRect();
+    ui.modalCanvas.scrollLeft += bounds.left + localX * zoom - clientX;
+    ui.modalCanvas.scrollTop += bounds.top + localY * zoom - clientY;
+  });
 }
-function closeFullscreen() { if (!state.fullscreen) return; const { diagram, parent, next } = state.fullscreen; parent.insertBefore(diagram, next); state.fullscreen = null; ui.mermaidModal.hidden = true; document.body.classList.remove("modal-open"); }
+function closeFullscreen() { if (!state.fullscreen) return; const { diagram, parent, next } = state.fullscreen; parent.insertBefore(diagram, next); state.fullscreen = null; ui.modalCanvas.classList.remove("panning"); ui.mermaidModal.hidden = true; document.body.classList.remove("modal-open"); }
 
 ui.editor.addEventListener("input", () => { if (!state.current) return; recordEditorHistory(); renderEditorHighlights(); setDirty(true); renderPreview(); });
+ui.outlineToggle.addEventListener("click", () => setDocumentOutlineCollapsed(!ui.preview.closest(".preview-pane").classList.contains("outline-collapsed")));
+ui.themeToggle.addEventListener("click", () => applyTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark"));
 ui.editor.addEventListener("scroll", () => { ui.editorHighlights.scrollTop = ui.editor.scrollTop; ui.editorHighlights.scrollLeft = ui.editor.scrollLeft; });
 ui.editor.addEventListener("paste", event => {
   state.pasteShortcutToken = null;
@@ -653,15 +871,43 @@ ui.preview.addEventListener("click", event => {
   const href = link.getAttribute("href") || "";
   if (/^(https?:|mailto:|tel:)/i.test(href)) return;
   if (href.startsWith("#")) { event.preventDefault(); scrollToAnchor(href); return; }
-  const targetUrl = new URL(href, `https://local-preview/${state.current.relativePath || fileName(state.current.path)}`);
+  const workspace = state.activeRoot ? state.roots.get(state.activeRoot) : workspaceForPath(state.current.path);
+  const currentRelativePath = workspace ? relativeToRoot(state.current.path, workspace.path) : state.current.relativePath || fileName(state.current.path);
+  const targetUrl = new URL(href, `https://local-preview/${currentRelativePath}`);
   const targetPath = decodeURIComponent(targetUrl.pathname.slice(1));
   if (!/\.(md|markdown)$/i.test(targetPath)) return;
   event.preventDefault();
-  const target = [...state.docs.values()].find(doc => doc.relativePath === targetPath);
-  if (target) selectDocument(target.path).then(() => { if (targetUrl.hash) scrollToAnchor(targetUrl.hash); });
+  const target = workspace && [...workspace.docs.values()].find(doc => relativeToRoot(doc.path, workspace.path) === targetPath);
+  if (target) selectDocument(target.path, workspace.path).then(() => { if (targetUrl.hash) scrollToAnchor(targetUrl.hash); });
   else setSaveState("未在当前目录中找到链接的 Markdown 文件", "error");
 });
 ui.mermaidModal.addEventListener("click", event => { const action = event.target.dataset.modalAction; if (event.target === ui.mermaidModal || action === "close") closeFullscreen(); else if (action === "in") applyFullscreenZoom(state.fullscreen.zoom + .25); else if (action === "out") applyFullscreenZoom(state.fullscreen.zoom - .25); });
+ui.modalCanvas.addEventListener("wheel", event => {
+  if (!state.fullscreen || !event.deltaY) return;
+  event.preventDefault();
+  const step = Math.min(.25, Math.max(.05, Math.abs(event.deltaY) * .002));
+  applyFullscreenZoom(state.fullscreen.zoom + (event.deltaY < 0 ? step : -step), event.clientX, event.clientY);
+}, { passive: false });
+ui.modalCanvas.addEventListener("dblclick", () => applyFullscreenZoom(1));
+ui.modalCanvas.addEventListener("pointerdown", event => {
+  if (!state.fullscreen || event.button !== 0) return;
+  state.fullscreen.pan = { pointerId: event.pointerId, clientX: event.clientX, clientY: event.clientY, scrollLeft: ui.modalCanvas.scrollLeft, scrollTop: ui.modalCanvas.scrollTop };
+  ui.modalCanvas.setPointerCapture(event.pointerId); ui.modalCanvas.classList.add("panning"); event.preventDefault();
+});
+ui.modalCanvas.addEventListener("pointermove", event => {
+  const pan = state.fullscreen?.pan;
+  if (!pan || pan.pointerId !== event.pointerId) return;
+  ui.modalCanvas.scrollLeft = pan.scrollLeft - (event.clientX - pan.clientX);
+  ui.modalCanvas.scrollTop = pan.scrollTop - (event.clientY - pan.clientY);
+});
+function stopFullscreenPan(event) {
+  const pan = state.fullscreen?.pan;
+  if (!pan || pan.pointerId !== event.pointerId) return;
+  if (ui.modalCanvas.hasPointerCapture(event.pointerId)) ui.modalCanvas.releasePointerCapture(event.pointerId);
+  delete state.fullscreen.pan; ui.modalCanvas.classList.remove("panning");
+}
+ui.modalCanvas.addEventListener("pointerup", stopFullscreenPan);
+ui.modalCanvas.addEventListener("pointercancel", stopFullscreenPan);
 ui.findReplaceModal.addEventListener("click", event => {
   const action = event.target.dataset.findAction;
   if (action === "close") closeFindReplace();
@@ -744,3 +990,6 @@ document.addEventListener("keydown", event => {
   if (shortcut && key === "s") { event.preventDefault(); saveCurrent(); }
   if (shortcut && (key === "f" || key === "h")) { event.preventDefault(); openFindReplace(); }
 });
+applyTheme(automaticTheme());
+scheduleAutomaticTheme();
+void restoreWorkspaceSession();

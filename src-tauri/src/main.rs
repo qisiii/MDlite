@@ -1,6 +1,6 @@
 use arboard::Clipboard;
 use base64::{engine::general_purpose::STANDARD, Engine as _};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::{fs, io::Write, path::{Path, PathBuf}, time::{SystemTime, UNIX_EPOCH}};
 use tauri::{menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder}, AppHandle, Emitter, Manager, Runtime};
 #[cfg(any(target_os = "macos", target_os = "ios", target_os = "android"))]
@@ -44,6 +44,25 @@ struct ClipboardPaste {
 struct RecentEntry {
   kind: String,
   path: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+struct WorkspaceRootSession {
+  path: String,
+  kind: String,
+  documents: Vec<String>,
+  closed_documents: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+struct WorkspaceSession {
+  roots: Vec<WorkspaceRootSession>,
+  expanded_folders: Vec<String>,
+  active_root: Option<String>,
+  current_path: Option<String>,
+  selected_folder: Option<String>,
 }
 
 const RECENT_LIMIT: usize = 5;
@@ -322,6 +341,79 @@ fn write_recent_entries<R: Runtime>(app: &AppHandle<R>, entries: &[RecentEntry])
   fs::write(path, content).map_err(|error| format!("无法保存历史记录：{}", error))
 }
 
+fn workspace_session_path<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
+  Ok(app.path().app_data_dir().map_err(|error| format!("无法定位应用数据目录：{}", error))?.join("workspace-session.txt"))
+}
+
+fn encode_session_path(path: &str) -> String { STANDARD.encode(path.as_bytes()) }
+
+fn decode_session_path(value: &str) -> Option<String> {
+  String::from_utf8(STANDARD.decode(value).ok()?).ok()
+}
+
+fn read_workspace_session<R: Runtime>(app: &AppHandle<R>) -> Option<WorkspaceSession> {
+  let path = workspace_session_path(app).ok()?;
+  let content = fs::read_to_string(path).ok()?;
+  let mut session = WorkspaceSession::default();
+  for line in content.lines() {
+    let fields = line.split('\t').collect::<Vec<_>>();
+    match fields.as_slice() {
+      ["root", kind, path] if matches!(*kind, "folder" | "files") => {
+        let path = decode_session_path(path)?;
+        if Path::new(&path).is_dir() { session.roots.push(WorkspaceRootSession { path, kind: (*kind).into(), documents: Vec::new(), closed_documents: Vec::new() }); }
+      }
+      ["document", root, path] => {
+        let (root, path) = (decode_session_path(root)?, decode_session_path(path)?);
+        if is_markdown(Path::new(&path)) && Path::new(&path).is_file() {
+          if let Some(entry) = session.roots.iter_mut().find(|entry| entry.path == root && entry.kind == "files") { entry.documents.push(path); }
+        }
+      }
+      ["closed", root, path] => {
+        let (root, path) = (decode_session_path(root)?, decode_session_path(path)?);
+        if is_markdown(Path::new(&path)) && Path::new(&path).is_file() {
+          if let Some(entry) = session.roots.iter_mut().find(|entry| entry.path == root) { entry.closed_documents.push(path); }
+        }
+      }
+      ["expanded", path] => if let Some(path) = decode_session_path(path) { session.expanded_folders.push(path); },
+      ["active", path] => session.active_root = decode_session_path(path),
+      ["current", path] => session.current_path = decode_session_path(path),
+      ["selected", path] => session.selected_folder = decode_session_path(path),
+      _ => {}
+    }
+  }
+  (!session.roots.is_empty()).then_some(session)
+}
+
+fn write_workspace_session<R: Runtime>(app: &AppHandle<R>, session: &WorkspaceSession) -> Result<(), String> {
+  let path = workspace_session_path(app)?;
+  let parent = path.parent().ok_or("无法定位应用数据目录")?;
+  fs::create_dir_all(parent).map_err(|error| format!("无法创建应用数据目录：{}", error))?;
+  let mut lines = Vec::new();
+  for root in &session.roots {
+    if !matches!(root.kind.as_str(), "folder" | "files") || !Path::new(&root.path).is_dir() { continue; }
+    lines.push(format!("root\t{}\t{}", root.kind, encode_session_path(&root.path)));
+    if root.kind == "files" {
+      for document in &root.documents {
+        if is_markdown(Path::new(document)) && Path::new(document).is_file() { lines.push(format!("document\t{}\t{}", encode_session_path(&root.path), encode_session_path(document))); }
+      }
+    }
+    for document in &root.closed_documents {
+      if is_markdown(Path::new(document)) && Path::new(document).is_file() { lines.push(format!("closed\t{}\t{}", encode_session_path(&root.path), encode_session_path(document))); }
+    }
+  }
+  for folder in &session.expanded_folders { lines.push(format!("expanded\t{}", encode_session_path(folder))); }
+  if let Some(path) = &session.active_root { lines.push(format!("active\t{}", encode_session_path(path))); }
+  if let Some(path) = &session.current_path { lines.push(format!("current\t{}", encode_session_path(path))); }
+  if let Some(path) = &session.selected_folder { lines.push(format!("selected\t{}", encode_session_path(path))); }
+  fs::write(path, lines.join("\n")).map_err(|error| format!("无法保存工作区会话：{}", error))
+}
+
+#[tauri::command]
+fn load_workspace_session(app: AppHandle) -> Option<WorkspaceSession> { read_workspace_session(&app) }
+
+#[tauri::command]
+fn save_workspace_session(app: AppHandle, session: WorkspaceSession) -> Result<(), String> { write_workspace_session(&app, &session) }
+
 fn recent_label(entry: &RecentEntry) -> String {
   let path = Path::new(&entry.path);
   let name = path.file_name().unwrap_or_else(|| path.as_os_str()).to_string_lossy();
@@ -409,7 +501,7 @@ fn main() {
       });
       Ok(())
     })
-    .invoke_handler(tauri::generate_handler![load_markdown_folder, read_markdown_file, save_markdown_file, save_markdown_file_as, create_markdown_folder, create_markdown_file, read_markdown_image, save_markdown_image, import_markdown_image, paste_markdown_clipboard, report_error, copy_markdown_text, read_clipboard_text, remember_recent])
+    .invoke_handler(tauri::generate_handler![load_markdown_folder, read_markdown_file, save_markdown_file, save_markdown_file_as, create_markdown_folder, create_markdown_file, read_markdown_image, save_markdown_image, import_markdown_image, paste_markdown_clipboard, report_error, copy_markdown_text, read_clipboard_text, remember_recent, load_workspace_session, save_workspace_session])
     .build(tauri::generate_context!())
     .unwrap_or_else(|error| panic!("启动 {} 失败：{}", APP_NAME, error))
     .run(|app_handle, event| {

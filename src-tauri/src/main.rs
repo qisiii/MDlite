@@ -178,8 +178,10 @@ fn create_markdown_file(parent_path: String, name: String) -> Result<MarkdownDoc
   let mut file_name = safe_name(&name)?;
   if !is_markdown(Path::new(&file_name)) { file_name.push_str(".md"); }
   let path = parent.join(&file_name);
+  if path.exists() { return Err(format!("{} 已存在", file_name)); }
   let title = file_name.trim_end_matches(".markdown").trim_end_matches(".md");
-  fs::write(&path, format!("# {}\n\n", title)).map_err(|error| format!("无法新建 Markdown 文档：{}", error))?;
+  let mut file = fs::OpenOptions::new().write(true).create_new(true).open(&path).map_err(|error| format!("无法新建 Markdown 文档：{}", error))?;
+  file.write_all(format!("# {}\n\n", title).as_bytes()).map_err(|error| format!("无法写入 Markdown 文档：{}", error))?;
   read_document(&path, &parent)
 }
 
@@ -447,13 +449,14 @@ fn build_application_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<tauri
   let recent_menu = recent_menu.build()?;
   let undo = MenuItemBuilder::with_id("undo", "撤销").accelerator("CmdOrCtrl+Z").build(app)?;
   let redo = MenuItemBuilder::with_id("redo", "恢复撤销").accelerator("CmdOrCtrl+Shift+Z").build(app)?;
+  let cut_selection = MenuItemBuilder::with_id("cut-selection", "剪切选中内容").accelerator("CmdOrCtrl+X").build(app)?;
   let copy_selection = MenuItemBuilder::with_id("copy-selection", "复制选中内容").accelerator("CmdOrCtrl+C").build(app)?;
   let find_replace = MenuItemBuilder::with_id("find-replace", "查找和替换…").accelerator("CmdOrCtrl+F").build(app)?;
   let edit_mode = MenuItemBuilder::with_id("mode-edit", "编辑模式").accelerator("CmdOrCtrl+1").build(app)?;
   let split_mode = MenuItemBuilder::with_id("mode-split", "分栏模式").accelerator("CmdOrCtrl+2").build(app)?;
   let preview_mode = MenuItemBuilder::with_id("mode-preview", "预览模式").accelerator("CmdOrCtrl+3").build(app)?;
   let file_menu = SubmenuBuilder::new(app, "文件").item(&new_markdown).item(&new_folder).separator().item(&open_folder).item(&open_file).item(&recent_menu).item(&reload).item(&close_document).separator().item(&insert_image).item(&paste_image).separator().item(&save).build()?;
-  let edit_menu = SubmenuBuilder::new(app, "编辑").item(&undo).item(&redo).separator().item(&copy_selection).separator().item(&find_replace).build()?;
+  let edit_menu = SubmenuBuilder::new(app, "编辑").item(&undo).item(&redo).separator().item(&cut_selection).item(&copy_selection).separator().item(&find_replace).build()?;
   let view_menu = SubmenuBuilder::new(app, "视图").item(&edit_mode).item(&split_mode).item(&preview_mode).build()?;
   MenuBuilder::new(app).item(&app_menu).item(&file_menu).item(&edit_menu).item(&view_menu).build()
 }

@@ -18,6 +18,7 @@ const ui = Object.fromEntries(["appVersion", "saveState", "fileTree", "fileCount
 const state = { roots: new Map(), docs: new Map(), recentDocuments: [], selectedFolder: null, activeRoot: null, expandedFolders: new Set(), current: null, dirty: false, mermaidSequence: 0, fullscreen: null, createKind: null, pasteShortcutToken: null, findPasteToken: null, previewMatch: null, reloadCheckPromise: null, reloadConflict: null, restoringSession: false, sessionSaveQueue: Promise.resolve(), themeTimer: null };
 let editorView = null;
 let selectionFormatMenu = null;
+let folderContextMenu = null;
 mermaid.initialize({ startOnLoad: false, securityLevel: "strict", theme: "neutral" });
 ui.appVersion.textContent = `v${APP_VERSION}`;
 
@@ -165,7 +166,7 @@ function closeSelectionFormatMenu() {
   selectionFormatMenu?.remove();
   selectionFormatMenu = null;
 }
-function positionSelectionFormatMenu(menu, clientX, clientY) {
+function positionFloatingMenu(menu, clientX, clientY) {
   const gap = 8;
   const rect = menu.getBoundingClientRect();
   menu.style.left = `${Math.max(gap, Math.min(clientX, window.innerWidth - rect.width - gap))}px`;
@@ -197,14 +198,21 @@ function openSelectionFormatMenu(clientX, clientY) {
   });
   const footer = document.createElement("div");
   footer.className = "mdlite-format-footer";
+  const cutButton = document.createElement("button");
+  cutButton.type = "button";
+  cutButton.className = "mdlite-format-command";
+  cutButton.setAttribute("role", "menuitem");
+  cutButton.innerHTML = "<span>剪切</span><kbd>⌘ X</kbd>";
+  cutButton.addEventListener("mousedown", event => event.preventDefault());
+  cutButton.addEventListener("click", () => { closeSelectionFormatMenu(); focusEditor(); void cutSelection(); });
   const copyButton = document.createElement("button");
   copyButton.type = "button";
-  copyButton.className = "mdlite-format-copy";
+  copyButton.className = "mdlite-format-command";
   copyButton.setAttribute("role", "menuitem");
   copyButton.innerHTML = "<span>复制</span><kbd>⌘ C</kbd>";
   copyButton.addEventListener("mousedown", event => event.preventDefault());
   copyButton.addEventListener("click", () => { closeSelectionFormatMenu(); focusEditor(); void copySelection(); });
-  footer.append(copyButton);
+  footer.append(cutButton, copyButton);
   menu.append(title, grid, footer);
   menu.addEventListener("keydown", event => {
     const items = [...menu.querySelectorAll('[role="menuitem"]')];
@@ -219,7 +227,7 @@ function openSelectionFormatMenu(clientX, clientY) {
   });
   document.body.append(menu);
   selectionFormatMenu = menu;
-  positionSelectionFormatMenu(menu, clientX, clientY);
+  positionFloatingMenu(menu, clientX, clientY);
   buttons[0]?.focus({ preventScroll: true });
 }
 function handleEditorContextMenu(event) {
@@ -538,7 +546,7 @@ async function openMarkdownPath(path, { selectCurrent = true, remember = true } 
   } catch (error) { void reportAppError("file-open", error); setSaveState(`打开失败：${error}`, "error"); }
 }
 
-async function selectDocument(path, rootPath = null) {
+async function selectDocument(path, rootPath = null, { skipDiscardConfirm = false } = {}) {
   const doc = state.docs.get(normalisePath(path));
   if (!doc) return;
   const root = rootPath ? state.roots.get(normalisePath(rootPath)) : workspaceForPath(doc.path);
@@ -549,7 +557,7 @@ async function selectDocument(path, rootPath = null) {
     renderTree();
     return;
   }
-  if (!confirmDiscardChanges()) return;
+  if (!skipDiscardConfirm && !confirmDiscardChanges()) return;
   state.current = doc;
   state.activeRoot = root?.path || null;
   state.selectedFolder = parentPath(doc.path); openParentFolders(doc.path, root?.path);
@@ -569,7 +577,54 @@ async function createUntitledDocument() {
   focusEditor();
 }
 
+function closeFolderContextMenu() {
+  folderContextMenu?.remove();
+  folderContextMenu = null;
+}
+function selectTreeFolder(path, summary) {
+  state.selectedFolder = path;
+  ui.fileTree.querySelectorAll(".tree-folder summary.selected").forEach(item => item.classList.remove("selected"));
+  summary.classList.add("selected");
+  persistWorkspaceSession();
+}
+function openFolderContextMenu(folderPath, clientX, clientY) {
+  closeSelectionFormatMenu();
+  closeFolderContextMenu();
+  const menu = document.createElement("div");
+  menu.className = "mdlite-folder-menu";
+  menu.setAttribute("role", "menu");
+  menu.setAttribute("aria-label", `文件夹操作：${fileName(folderPath) || folderPath}`);
+  const createButton = document.createElement("button");
+  createButton.type = "button";
+  createButton.className = "mdlite-folder-menu-item";
+  createButton.setAttribute("role", "menuitem");
+  createButton.innerHTML = '<span class="mdlite-folder-menu-icon">＋</span><span>新建 Markdown 文档</span>';
+  createButton.addEventListener("click", () => {
+    closeFolderContextMenu();
+    openCreate("file", folderPath);
+  });
+  menu.addEventListener("keydown", event => {
+    if (event.key !== "Escape") return;
+    event.preventDefault();
+    closeFolderContextMenu();
+  });
+  menu.append(createButton);
+  document.body.append(menu);
+  folderContextMenu = menu;
+  positionFloatingMenu(menu, clientX, clientY);
+  createButton.focus({ preventScroll: true });
+}
+function attachFolderInteractions(summary, folderPath) {
+  summary.addEventListener("click", () => selectTreeFolder(folderPath, summary));
+  summary.addEventListener("contextmenu", event => {
+    event.preventDefault();
+    event.stopPropagation();
+    selectTreeFolder(folderPath, summary);
+    openFolderContextMenu(folderPath, event.clientX, event.clientY);
+  });
+}
 function renderTree() {
+  closeFolderContextMenu();
   renderRecentDocuments();
   ui.fileTree.replaceChildren();
   const renderNode = (node, container, workspace) => {
@@ -577,12 +632,7 @@ function renderTree() {
       const details = document.createElement("details"); details.className = "tree-folder"; details.open = state.expandedFolders.has(folder.path);
       const summary = document.createElement("summary"); summary.innerHTML = `<span class="folder-chevron"></span><svg class="folder-icon" viewBox="0 0 24 24" aria-hidden="true"><path fill="#8ed0f5" d="M2.5 7.3A2.3 2.3 0 0 1 4.8 5h5l1.7 2h7.7a2.3 2.3 0 0 1 2.3 2.3v8.9a2.3 2.3 0 0 1-2.3 2.3H4.8a2.3 2.3 0 0 1-2.3-2.3V7.3Z"/><path fill="#4ca9df" d="M2.5 9.3h19v8.9a2.3 2.3 0 0 1-2.3 2.3H4.8a2.3 2.3 0 0 1-2.3-2.3V9.3Z"/></svg><span class="folder-name"></span>`; summary.querySelector(".folder-name").textContent = name; summary.title = folder.path;
       if (state.selectedFolder === folder.path) summary.classList.add("selected");
-      summary.addEventListener("click", () => {
-        state.selectedFolder = folder.path;
-        ui.fileTree.querySelectorAll(".tree-folder summary.selected").forEach(item => item.classList.remove("selected"));
-        summary.classList.add("selected");
-        persistWorkspaceSession();
-      });
+      attachFolderInteractions(summary, folder.path);
       details.addEventListener("toggle", () => { if (details.open) state.expandedFolders.add(folder.path); else state.expandedFolders.delete(folder.path); persistWorkspaceSession(); });
       const children = document.createElement("div"); children.className = "tree-children"; renderNode(folder, children, workspace);
       details.append(summary, children); container.append(details);
@@ -615,7 +665,7 @@ function renderTree() {
     const summary = document.createElement("summary"); summary.innerHTML = `<span class="folder-chevron"></span><svg class="folder-icon" viewBox="0 0 24 24" aria-hidden="true"><path fill="#8ed0f5" d="M2.5 7.3A2.3 2.3 0 0 1 4.8 5h5l1.7 2h7.7a2.3 2.3 0 0 1 2.3 2.3v8.9a2.3 2.3 0 0 1-2.3 2.3H4.8a2.3 2.3 0 0 1-2.3-2.3V7.3Z"/><path fill="#4ca9df" d="M2.5 9.3h19v8.9a2.3 2.3 0 0 1-2.3 2.3H4.8a2.3 2.3 0 0 1-2.3 2.3V9.3Z"/></svg><span class="folder-name"></span>`; summary.querySelector(".folder-name").textContent = fileName(workspace.path) || workspace.path; summary.title = workspace.path;
     const close = document.createElement("button"); close.type = "button"; close.className = "tree-close"; close.textContent = "×"; close.title = `关闭 ${fileName(workspace.path) || workspace.path}`; close.setAttribute("aria-label", close.title); close.addEventListener("click", event => { event.preventDefault(); event.stopPropagation(); closeWorkspace(workspace.path); }); summary.append(close);
     if (state.selectedFolder === workspace.path) summary.classList.add("selected");
-    summary.addEventListener("click", () => { state.selectedFolder = workspace.path; ui.fileTree.querySelectorAll(".tree-folder summary.selected").forEach(item => item.classList.remove("selected")); summary.classList.add("selected"); persistWorkspaceSession(); });
+    attachFolderInteractions(summary, workspace.path);
     details.addEventListener("toggle", () => { if (details.open) state.expandedFolders.add(workspace.path); else state.expandedFolders.delete(workspace.path); persistWorkspaceSession(); });
     const children = document.createElement("div"); children.className = "tree-children"; renderNode(root, children, workspace);
     details.append(summary, children); ui.fileTree.append(details);
@@ -638,7 +688,16 @@ function restoreBlocks(html, blocks) {
   });
 }
 function sanitize(root) {
-  root.querySelectorAll("script,iframe,object,embed,base,link,meta,form,input,button").forEach(node => { if (!node.matches(".fullscreen-chart")) node.remove(); });
+  root.querySelectorAll("input").forEach(input => {
+    const isReadOnlyTask = input.matches('li > input[type="checkbox"][disabled]');
+    if (!isReadOnlyTask) { input.remove(); return; }
+    [...input.attributes].forEach(attr => {
+      if (!["type", "checked", "disabled"].includes(attr.name.toLowerCase())) input.removeAttribute(attr.name);
+    });
+    input.parentElement.classList.add("task-list-item");
+    input.closest("ul,ol")?.classList.add("task-list");
+  });
+  root.querySelectorAll("script,iframe,object,embed,base,link,meta,form,button").forEach(node => { if (!node.matches(".fullscreen-chart")) node.remove(); });
   root.querySelectorAll("*").forEach(node => [...node.attributes].forEach(attr => {
     const name = attr.name.toLowerCase(), value = attr.value.trim().toLowerCase();
     if (name.startsWith("on") || ((name === "href" || name === "src") && /^(javascript|data:text\/html):/.test(value))) node.removeAttribute(attr.name);
@@ -896,24 +955,36 @@ function openFindReplace() {
   updateFindStatus();
 }
 function closeFindReplace() { clearPreviewFindHighlights(); ui.findReplaceModal.hidden = true; }
-function openCreate(kind) {
-  const workspace = state.selectedFolder && workspaceForPath(state.selectedFolder);
-  if (!workspace || !state.selectedFolder) { setSaveState("请先打开一个 Markdown 文档目录", "error"); return; }
-  state.createKind = kind; ui.createTitle.textContent = "新建文件夹";
-  ui.createName.placeholder = "例如：接口文档";
-  const relative = relativeToRoot(state.selectedFolder, workspace.path); ui.createTarget.textContent = `将在 ${relative ? relative : "当前文档根目录"} 中创建。`;
+function openCreate(kind, targetFolder = state.selectedFolder) {
+  const parentPath = targetFolder && normalisePath(targetFolder);
+  const workspace = parentPath && workspaceForPath(parentPath);
+  if (!workspace || !parentPath) { setSaveState("请先打开一个 Markdown 文档目录", "error"); return; }
+  closeFolderContextMenu();
+  state.selectedFolder = parentPath;
+  state.createKind = kind;
+  ui.createTitle.textContent = kind === "file" ? "新建 Markdown 文档" : "新建文件夹";
+  ui.createName.placeholder = kind === "file" ? "例如：接口说明" : "例如：接口文档";
+  const relative = relativeToRoot(parentPath, workspace.path); ui.createTarget.textContent = `将在 ${relative ? relative : "当前文档根目录"} 中创建。`;
   ui.createName.value = ""; ui.createModal.hidden = false; ui.createName.focus();
 }
 function closeCreate() { ui.createModal.hidden = true; state.createKind = null; }
 async function createEntry() {
   const name = ui.createName.value.trim(), parentPath = state.selectedFolder;
   if (!name || !state.createKind || !parentPath) return;
+  if (state.createKind === "file" && !confirmDiscardChanges()) return;
   try {
+    const workspace = workspaceForPath(parentPath);
+    if (!workspace) throw new Error("未找到创建位置所属的文档目录");
     if (state.createKind === "folder") {
       const folder = await invoke("create_markdown_folder", { parentPath, name });
-      const workspace = workspaceForPath(parentPath);
-      if (!workspace) throw new Error("未找到创建位置所属的文档目录");
       const path = normalisePath(folder.path); addFolder(workspace, folder); state.expandedFolders.add(parentPath); state.selectedFolder = path; renderTree(); setSaveState("文件夹已创建", "ok");
+    } else {
+      const document = addDocument(workspace, await invoke("create_markdown_file", { parentPath, name }));
+      state.expandedFolders.add(parentPath); openParentFolders(document.path, workspace.path);
+      closeCreate();
+      await selectDocument(document.path, workspace.path, { skipDiscardConfirm: true });
+      setSaveState("Markdown 文档已创建", "ok");
+      return;
     }
     closeCreate();
   } catch (error) { void reportAppError("create-entry", error); ui.createTarget.textContent = `创建失败：${error}`; }
@@ -1052,6 +1123,20 @@ async function copySelection() {
   if (!text) { setSaveState("请先选中要复制的内容", "error"); return; }
   try { await invoke("copy_markdown_text", { text }); setSaveState("已复制选中内容", "ok"); }
   catch (error) { void reportAppError("copy-selection", error); setSaveState(`复制失败：${error}`, "error"); }
+}
+async function cutSelection() {
+  if (!editorView || !state.current) { setSaveState("请先打开要编辑的文档", "error"); return; }
+  const { start, end } = editorSelection();
+  const text = editorValue().slice(start, end);
+  if (!text) { setSaveState("请先选中要剪切的内容", "error"); return; }
+  try {
+    await invoke("copy_markdown_text", { text });
+    replaceEditorRange(start, end, "", start);
+    setSaveState("已剪切选中内容", "ok");
+  } catch (error) {
+    void reportAppError("cut-selection", error);
+    setSaveState(`剪切失败：${error}`, "error");
+  }
 }
 
 function openFullscreen(box) {
@@ -1199,10 +1284,13 @@ function handleFindInputKeydown(event, input) {
 ui.findText.addEventListener("keydown", event => { if (isImeComposing(event)) return; handleFindInputKeydown(event, ui.findText); if (event.key === "Enter") { event.preventDefault(); findMatch(event.shiftKey ? -1 : 1); } });
 ui.replaceText.addEventListener("keydown", event => { if (isImeComposing(event)) return; handleFindInputKeydown(event, ui.replaceText); });
 document.querySelectorAll("[data-mode]").forEach(button => button.addEventListener("click", () => setMode(button.dataset.mode)));
-document.addEventListener("pointerdown", event => { if (selectionFormatMenu && !selectionFormatMenu.contains(event.target)) closeSelectionFormatMenu(); });
-document.addEventListener("scroll", closeSelectionFormatMenu, true);
-window.addEventListener("blur", closeSelectionFormatMenu);
-window.addEventListener("resize", closeSelectionFormatMenu);
+document.addEventListener("pointerdown", event => {
+  if (selectionFormatMenu && !selectionFormatMenu.contains(event.target)) closeSelectionFormatMenu();
+  if (folderContextMenu && !folderContextMenu.contains(event.target)) closeFolderContextMenu();
+});
+document.addEventListener("scroll", () => { closeSelectionFormatMenu(); closeFolderContextMenu(); }, true);
+window.addEventListener("blur", () => { closeSelectionFormatMenu(); closeFolderContextMenu(); });
+window.addEventListener("resize", () => { closeSelectionFormatMenu(); closeFolderContextMenu(); });
 listen("menu-action", event => {
   if (state.reloadConflict) return;
   switch (event.payload) {
@@ -1211,10 +1299,11 @@ listen("menu-action", event => {
     case "close-document": closeCurrentDocument(); break;
     case "insert-image": selectImages(); break;
     case "paste-image": pasteClipboardContent(); break;
+    case "cut-selection": cutSelection(); break;
     case "copy-selection": copySelection(); break;
     case "undo": undoEditor(); break;
     case "redo": redoEditor(); break;
-    case "new-markdown": createUntitledDocument(); break;
+    case "new-markdown": state.selectedFolder ? openCreate("file") : createUntitledDocument(); break;
     case "new-folder": openCreate("folder"); break;
     case "save": saveCurrent(); break;
     case "reload": checkDiskVersion(true); break;

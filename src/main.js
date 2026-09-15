@@ -4,12 +4,20 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { marked } from "marked";
 import mermaid from "mermaid";
+import { basicSetup, EditorView } from "codemirror";
+import { EditorState } from "@codemirror/state";
+import { undo, redo } from "@codemirror/commands";
+import { markdown } from "@codemirror/lang-markdown";
+import { closeSearchPanel, findNext, findPrevious, getSearchQuery, openSearchPanel, replaceAll, replaceNext, search, SearchQuery, setSearchQuery } from "@codemirror/search";
+import { autocompletion, snippetCompletion } from "@codemirror/autocomplete";
 import "./style.css";
 
 const APP_VERSION = __APP_VERSION__;
 const APP_NAME = __APP_NAME__;
-const ui = Object.fromEntries(["appVersion", "saveState", "fileTree", "fileCount", "recentList", "editor", "editorHighlights", "currentPath", "dirtyMark", "preview", "previewState", "workspace", "documentOutline", "outlineToggle", "themeToggle", "mermaidModal", "modalCanvas", "modalZoom", "findReplaceModal", "findText", "replaceText", "findStatus", "createModal", "createTitle", "createName", "createTarget", "reloadModal", "reloadFileName", "reloadMessage"].map(id => [id, document.getElementById(id)]));
-const state = { roots: new Map(), docs: new Map(), recentDocuments: [], selectedFolder: null, activeRoot: null, expandedFolders: new Set(), current: null, dirty: false, mermaidSequence: 0, fullscreen: null, createKind: null, pasteShortcutToken: null, findPasteToken: null, previewMatch: null, history: [], historyIndex: -1, historyApplying: false, reloadCheckPromise: null, reloadConflict: null, restoringSession: false, sessionSaveQueue: Promise.resolve(), themeTimer: null };
+const ui = Object.fromEntries(["appVersion", "saveState", "fileTree", "fileCount", "recentList", "editor", "currentPath", "dirtyMark", "preview", "previewState", "workspace", "documentOutline", "outlineToggle", "themeToggle", "mermaidModal", "modalCanvas", "modalZoom", "findReplaceModal", "findText", "replaceText", "findStatus", "createModal", "createTitle", "createName", "createTarget", "reloadModal", "reloadFileName", "reloadMessage"].map(id => [id, document.getElementById(id)]));
+const state = { roots: new Map(), docs: new Map(), recentDocuments: [], selectedFolder: null, activeRoot: null, expandedFolders: new Set(), current: null, dirty: false, mermaidSequence: 0, fullscreen: null, createKind: null, pasteShortcutToken: null, findPasteToken: null, previewMatch: null, reloadCheckPromise: null, reloadConflict: null, restoringSession: false, sessionSaveQueue: Promise.resolve(), themeTimer: null };
+let editorView = null;
+let selectionFormatMenu = null;
 mermaid.initialize({ startOnLoad: false, securityLevel: "strict", theme: "neutral" });
 ui.appVersion.textContent = `v${APP_VERSION}`;
 
@@ -60,39 +68,313 @@ function scheduleAutomaticTheme() {
   else { next.setDate(next.getDate() + 1); next.setHours(7, 0, 0, 0); }
   state.themeTimer = window.setTimeout(() => { applyTheme(automaticTheme()); scheduleAutomaticTheme(); }, Math.max(0, next.getTime() - now.getTime()) + 50);
 }
-function resetHistory(content) {
-  state.history = [{ content, start: 0, end: 0 }];
-  state.historyIndex = 0;
+function editorValue() { return editorView?.state.doc.toString() || ""; }
+function editorSelection() {
+  const selection = editorView?.state.selection.main;
+  return { start: selection?.from || 0, end: selection?.to || 0 };
 }
-function recordEditorHistory() {
-  if (state.historyApplying || !state.current) return;
-  const entry = { content: ui.editor.value, start: ui.editor.selectionStart, end: ui.editor.selectionEnd };
-  const current = state.history[state.historyIndex];
-  if (current?.content === entry.content) return;
-  state.history.splice(state.historyIndex + 1);
-  state.history.push(entry);
-  if (state.history.length > 100) state.history.shift();
-  state.historyIndex = state.history.length - 1;
+function editorHasFocus() { return Boolean(editorView?.hasFocus); }
+function focusEditor() { editorView?.focus(); }
+function replaceEditorSelection(text, selectionMode = "end") {
+  if (!editorView) return;
+  const { start, end } = editorSelection();
+  const selection = selectionMode === "select"
+    ? { anchor: start, head: start + text.length }
+    : { anchor: start + text.length };
+  editorView.dispatch({ changes: { from: start, to: end, insert: text }, selection });
 }
-function applyHistory(index) {
-  const entry = state.history[index];
-  if (!entry) return;
-  state.historyApplying = true;
-  state.historyIndex = index;
-  ui.editor.value = entry.content;
-  ui.editor.setSelectionRange(entry.start, entry.end);
-  notifyEditorChange();
-  state.historyApplying = false;
-  ui.editor.focus();
+function replaceEditorRange(from, to, insert, anchor = from, head = anchor) {
+  if (!editorView) return;
+  editorView.dispatch({ changes: { from, to, insert }, selection: { anchor, head }, scrollIntoView: true });
+  focusEditor();
 }
-function undoEditor() {
-  if (state.historyIndex <= 0) { setSaveState("没有可撤销的修改"); return; }
-  applyHistory(state.historyIndex - 1); setSaveState("已撤销", "ok");
+function toggleSelectedWrapper(open, close = open) {
+  const { start, end } = editorSelection();
+  if (!editorView || start === end) return;
+  const doc = editorView.state.doc;
+  const selected = doc.sliceString(start, end);
+  const italicConflict = open === "*" && (selected.startsWith("**") || selected.endsWith("**"));
+  const wrapped = !italicConflict && selected.length >= open.length + close.length && selected.startsWith(open) && selected.endsWith(close);
+  const outerFrom = start - open.length;
+  const outerTo = end + close.length;
+  const outerItalicConflict = open === "*" && ((outerFrom > 0 && doc.sliceString(outerFrom - 1, outerFrom) === "*") || (outerTo < doc.length && doc.sliceString(outerTo, outerTo + 1) === "*"));
+  const outerWrapped = !outerItalicConflict && outerFrom >= 0 && outerTo <= doc.length && doc.sliceString(outerFrom, start) === open && doc.sliceString(end, outerTo) === close;
+  if (wrapped) {
+    const insert = selected.slice(open.length, selected.length - close.length);
+    replaceEditorRange(start, end, insert, start, start + insert.length);
+  } else if (outerWrapped) {
+    replaceEditorRange(outerFrom, outerTo, selected, outerFrom, outerFrom + selected.length);
+  } else {
+    const insert = `${open}${selected}${close}`;
+    replaceEditorRange(start, end, insert, start + open.length, start + open.length + selected.length);
+  }
 }
-function redoEditor() {
-  if (state.historyIndex >= state.history.length - 1) { setSaveState("没有可恢复的修改"); return; }
-  applyHistory(state.historyIndex + 1); setSaveState("已恢复撤销", "ok");
+function selectedLineRange() {
+  if (!editorView) return null;
+  const { start, end } = editorSelection();
+  if (start === end) return null;
+  const doc = editorView.state.doc;
+  const lastPosition = end > start && doc.lineAt(end).from === end ? end - 1 : end;
+  return { from: doc.lineAt(start).from, to: doc.lineAt(lastPosition).to };
 }
+function toggleSelectedLinePrefix(prefix, targetPattern, groupPattern = targetPattern) {
+  const range = selectedLineRange();
+  if (!range || !editorView) return;
+  const selected = editorView.state.doc.sliceString(range.from, range.to);
+  const lines = selected.split("\n");
+  const contentLines = lines.filter(line => line.trim());
+  const remove = contentLines.length > 0 && contentLines.every(line => targetPattern.test(line));
+  const insert = lines.map(line => {
+    if (!line.trim()) return line;
+    return remove ? line.replace(targetPattern, "") : `${prefix}${line.replace(groupPattern, "")}`;
+  }).join("\n");
+  replaceEditorRange(range.from, range.to, insert, range.from, range.from + insert.length);
+}
+function linkSelectedText() {
+  const { start, end } = editorSelection();
+  if (!editorView || start === end) return;
+  const selected = editorView.state.doc.sliceString(start, end);
+  const insert = `[${selected}](https://)`;
+  const urlStart = start + selected.length + 3;
+  replaceEditorRange(start, end, insert, urlStart, urlStart + 8);
+}
+function codeBlockSelectedText() {
+  const { start, end } = editorSelection();
+  if (!editorView || start === end) return;
+  const selected = editorView.state.doc.sliceString(start, end);
+  const fenced = selected.startsWith("```\n") && selected.endsWith("\n```");
+  const insert = fenced ? selected.slice(4, -4) : `\`\`\`\n${selected}\n\`\`\``;
+  const innerStart = fenced ? start : start + 4;
+  replaceEditorRange(start, end, insert, innerStart, innerStart + (fenced ? insert.length : selected.length));
+}
+const selectionFormatOptions = [
+  { label: "一级标题", mark: "H1", action: () => toggleSelectedLinePrefix("# ", /^#\s+/, /^#{1,6}\s+/) },
+  { label: "二级标题", mark: "H2", action: () => toggleSelectedLinePrefix("## ", /^##\s+/, /^#{1,6}\s+/) },
+  { label: "加粗", mark: "B", action: () => toggleSelectedWrapper("**") },
+  { label: "斜体", mark: "I", action: () => toggleSelectedWrapper("*") },
+  { label: "删除线", mark: "S", action: () => toggleSelectedWrapper("~~") },
+  { label: "行内代码", mark: "<>", action: () => toggleSelectedWrapper("`") },
+  { label: "链接", mark: "↗", action: linkSelectedText },
+  { label: "引用", mark: "❯", action: () => toggleSelectedLinePrefix("> ", /^>\s+/) },
+  { label: "无序列表", mark: "•", action: () => toggleSelectedLinePrefix("- ", /^[-*+]\s+/, /^(?:[-*+]\s+(?:\[[ xX]\]\s+)?|\d+[.)]\s+)/) },
+  { label: "有序列表", mark: "1.", action: () => toggleSelectedLinePrefix("1. ", /^\d+[.)]\s+/, /^(?:[-*+]\s+(?:\[[ xX]\]\s+)?|\d+[.)]\s+)/) },
+  { label: "待办", mark: "☐", action: () => toggleSelectedLinePrefix("- [ ] ", /^[-*+]\s+\[[ xX]\]\s+/, /^(?:[-*+]\s+(?:\[[ xX]\]\s+)?|\d+[.)]\s+)/) },
+  { label: "代码块", mark: "{ }", action: codeBlockSelectedText },
+];
+function closeSelectionFormatMenu() {
+  selectionFormatMenu?.remove();
+  selectionFormatMenu = null;
+}
+function positionSelectionFormatMenu(menu, clientX, clientY) {
+  const gap = 8;
+  const rect = menu.getBoundingClientRect();
+  menu.style.left = `${Math.max(gap, Math.min(clientX, window.innerWidth - rect.width - gap))}px`;
+  menu.style.top = `${Math.max(gap, Math.min(clientY, window.innerHeight - rect.height - gap))}px`;
+}
+function openSelectionFormatMenu(clientX, clientY) {
+  closeSelectionFormatMenu();
+  const menu = document.createElement("div");
+  menu.className = "mdlite-format-menu";
+  menu.setAttribute("role", "menu");
+  menu.setAttribute("aria-label", "快速修改 Markdown 格式");
+  const title = document.createElement("div");
+  title.className = "mdlite-format-title";
+  title.textContent = "快速格式";
+  const grid = document.createElement("div");
+  grid.className = "mdlite-format-grid";
+  const buttons = selectionFormatOptions.map(option => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "mdlite-format-item";
+    button.setAttribute("role", "menuitem");
+    button.innerHTML = `<span class="mdlite-format-mark"></span><span class="mdlite-format-label"></span>`;
+    button.querySelector(".mdlite-format-mark").textContent = option.mark;
+    button.querySelector(".mdlite-format-label").textContent = option.label;
+    button.addEventListener("mousedown", event => event.preventDefault());
+    button.addEventListener("click", () => { closeSelectionFormatMenu(); focusEditor(); option.action(); });
+    grid.append(button);
+    return button;
+  });
+  const footer = document.createElement("div");
+  footer.className = "mdlite-format-footer";
+  const copyButton = document.createElement("button");
+  copyButton.type = "button";
+  copyButton.className = "mdlite-format-copy";
+  copyButton.setAttribute("role", "menuitem");
+  copyButton.innerHTML = "<span>复制</span><kbd>⌘ C</kbd>";
+  copyButton.addEventListener("mousedown", event => event.preventDefault());
+  copyButton.addEventListener("click", () => { closeSelectionFormatMenu(); focusEditor(); void copySelection(); });
+  footer.append(copyButton);
+  menu.append(title, grid, footer);
+  menu.addEventListener("keydown", event => {
+    const items = [...menu.querySelectorAll('[role="menuitem"]')];
+    const index = items.indexOf(document.activeElement);
+    let next = null;
+    if (event.key === "Escape") { event.preventDefault(); closeSelectionFormatMenu(); focusEditor(); return; }
+    if (event.key === "ArrowDown") next = items[(index + 1) % items.length];
+    else if (event.key === "ArrowUp") next = items[(index - 1 + items.length) % items.length];
+    else if (event.key === "Home") next = items[0];
+    else if (event.key === "End") next = items.at(-1);
+    if (next) { event.preventDefault(); next.focus(); }
+  });
+  document.body.append(menu);
+  selectionFormatMenu = menu;
+  positionSelectionFormatMenu(menu, clientX, clientY);
+  buttons[0]?.focus({ preventScroll: true });
+}
+function handleEditorContextMenu(event) {
+  if (!editorView || !state.current) return;
+  const { start, end } = editorSelection();
+  const position = editorView.posAtCoords({ x: event.clientX, y: event.clientY });
+  if (start === end || position === null || position < start || position > end) { closeSelectionFormatMenu(); return; }
+  event.preventDefault();
+  openSelectionFormatMenu(event.clientX, event.clientY);
+}
+const markdownSlashOptions = [
+  snippetCompletion("# ${1:标题}", { label: "/标题", detail: "一级标题", type: "keyword", boost: 100 }),
+  snippetCompletion("## ${1:标题}", { label: "/二级标题", detail: "二级标题", type: "keyword" }),
+  snippetCompletion("**${1:文字}**", { label: "/加粗", detail: "强调文字", type: "keyword" }),
+  snippetCompletion("*${1:文字}*", { label: "/斜体", detail: "倾斜文字", type: "keyword" }),
+  snippetCompletion("~~${1:文字}~~", { label: "/删除线", detail: "划掉文字", type: "keyword" }),
+  snippetCompletion("[${1:链接文字}](${2:https://})", { label: "/链接", detail: "插入超链接", type: "link" }),
+  snippetCompletion("![${1:图片说明}](${2:图片地址})", { label: "/图片", detail: "插入图片", type: "link" }),
+  snippetCompletion("- [ ] ${1:待办事项}", { label: "/待办", detail: "任务清单", type: "keyword" }),
+  snippetCompletion("- [x] ${1:已完成事项}", { label: "/已完成待办", detail: "已完成任务", type: "keyword" }),
+  snippetCompletion("- ${1:列表项}", { label: "/无序列表", detail: "项目符号列表", type: "keyword" }),
+  snippetCompletion("1. ${1:列表项}", { label: "/有序列表", detail: "编号列表", type: "keyword" }),
+  snippetCompletion("> ${1:引用内容}", { label: "/引用", detail: "引用文字", type: "keyword" }),
+  snippetCompletion("```\n${1:代码}\n```", { label: "/代码块", detail: "插入代码块", type: "keyword" }),
+  snippetCompletion("| ${1:列 1} | ${2:列 2} |\n| --- | --- |\n| ${3:内容} | ${4:内容} |", { label: "/表格", detail: "两列表格", type: "keyword" }),
+  snippetCompletion("---", { label: "/分割线", detail: "水平分隔线", type: "keyword" }),
+  snippetCompletion("```mermaid\ngraph TD\n  A[开始] --> B[结束]\n```", { label: "/Mermaid", detail: "流程图模板", type: "keyword" }),
+];
+function markdownSlashCompletion(context) {
+  const before = context.matchBefore(/\/[\u4e00-\u9fffA-Za-z0-9_-]*/);
+  if (!before) return null;
+  const line = context.state.doc.lineAt(context.pos);
+  const prefix = line.text.slice(0, context.pos - line.from);
+  if (!/^\s*\/[\u4e00-\u9fffA-Za-z0-9_-]*$/.test(prefix)) return null;
+  return { from: before.from, options: markdownSlashOptions, validFor: /\/[\u4e00-\u9fffA-Za-z0-9_-]*/ };
+}
+function searchButton(label, title, action, className = "") {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = `mdlite-search-button ${className}`.trim();
+  button.textContent = label;
+  button.title = title;
+  button.setAttribute("aria-label", title);
+  button.addEventListener("click", action);
+  return button;
+}
+class MarkdownSearchPanel {
+  constructor(view) {
+    this.view = view;
+    this.query = getSearchQuery(view.state);
+    this.dom = document.createElement("form");
+    this.dom.className = "cm-search mdlite-search-panel";
+    this.dom.setAttribute("aria-label", "查找和替换");
+
+    this.searchField = document.createElement("input");
+    this.searchField.type = "text";
+    this.searchField.placeholder = "查找";
+    this.searchField.setAttribute("main-field", "true");
+    this.searchField.setAttribute("aria-label", "查找");
+    this.replaceField = document.createElement("input");
+    this.replaceField.type = "text";
+    this.replaceField.placeholder = "替换为";
+    this.replaceField.setAttribute("aria-label", "替换为");
+
+    this.caseButton = searchButton("Aa", "区分大小写", () => this.toggle("caseSensitive"), "option");
+    this.regexButton = searchButton(".*", "使用正则表达式", () => this.toggle("regexp"), "option");
+    this.wordButton = searchButton("词", "全词匹配", () => this.toggle("wholeWord"), "option");
+    const navigation = document.createElement("div"); navigation.className = "mdlite-search-actions";
+    navigation.append(
+      searchButton("↑", "上一处", () => findPrevious(this.view)),
+      searchButton("↓", "下一处", () => findNext(this.view)),
+      this.caseButton, this.regexButton, this.wordButton,
+      searchButton("×", "关闭", () => closeSearchPanel(this.view), "close"),
+    );
+    const firstRow = document.createElement("div"); firstRow.className = "mdlite-search-row"; firstRow.append(this.searchField, navigation);
+    const replacements = document.createElement("div"); replacements.className = "mdlite-search-row mdlite-search-replace";
+    replacements.append(
+      this.replaceField,
+      searchButton("替换", "替换当前匹配项", () => replaceNext(this.view), "text"),
+      searchButton("全部替换", "替换所有匹配项", () => replaceAll(this.view), "text primary"),
+    );
+    this.dom.append(firstRow, replacements);
+    this.dom.addEventListener("submit", event => { event.preventDefault(); findNext(this.view); });
+    this.dom.addEventListener("keydown", event => this.handleKeydown(event));
+    this.searchField.addEventListener("input", () => this.commit());
+    this.replaceField.addEventListener("input", () => this.commit());
+    this.setQuery(this.query);
+  }
+  commit() {
+    const query = new SearchQuery({
+      search: this.searchField.value,
+      replace: this.replaceField.value,
+      caseSensitive: this.query.caseSensitive,
+      regexp: this.query.regexp,
+      wholeWord: this.query.wholeWord,
+    });
+    if (!query.eq(this.query)) { this.query = query; this.view.dispatch({ effects: setSearchQuery.of(query) }); }
+  }
+  toggle(field) {
+    this.query = new SearchQuery({ ...this.query, [field]: !this.query[field] });
+    this.view.dispatch({ effects: setSearchQuery.of(this.query) });
+  }
+  handleKeydown(event) {
+    if (event.key === "Escape") { event.preventDefault(); closeSearchPanel(this.view); }
+    else if (event.key === "Enter") {
+      event.preventDefault();
+      if (event.target === this.replaceField) replaceNext(this.view);
+      else (event.shiftKey ? findPrevious : findNext)(this.view);
+    }
+  }
+  setQuery(query) {
+    this.query = query;
+    this.searchField.value = query.search;
+    this.replaceField.value = query.replace;
+    this.caseButton.classList.toggle("active", query.caseSensitive);
+    this.regexButton.classList.toggle("active", query.regexp);
+    this.wordButton.classList.toggle("active", query.wholeWord);
+    [this.caseButton, this.regexButton, this.wordButton].forEach(button => button.setAttribute("aria-pressed", String(button.classList.contains("active"))));
+  }
+  update(update) {
+    for (const transaction of update.transactions) for (const effect of transaction.effects) if (effect.is(setSearchQuery) && !effect.value.eq(this.query)) this.setQuery(effect.value);
+  }
+  mount() { this.searchField.select(); }
+  get top() { return true; }
+}
+function createMarkdownEditor(content = "", readOnly = true) {
+  closeSelectionFormatMenu();
+  editorView?.destroy();
+  ui.editor.replaceChildren();
+  editorView = new EditorView({
+    parent: ui.editor,
+    state: EditorState.create({
+      doc: content,
+      extensions: [
+        basicSetup,
+        markdown(),
+        autocompletion({ override: [markdownSlashCompletion], defaultKeymap: true }),
+        search({ top: true, createPanel: view => new MarkdownSearchPanel(view) }),
+        EditorState.readOnly.of(readOnly),
+        EditorView.lineWrapping,
+        EditorView.updateListener.of(update => {
+          if (update.selectionSet) closeSelectionFormatMenu();
+          if (!update.docChanged || !state.current) return;
+          setDirty(true);
+          void renderPreview();
+        }),
+      ],
+    }),
+  });
+  editorView.contentDOM.addEventListener("paste", handleEditorPaste);
+  editorView.contentDOM.addEventListener("contextmenu", handleEditorContextMenu);
+}
+function setEditorDocument(content, readOnly = false) { createMarkdownEditor(content, readOnly); }
+function undoEditor() { if (!editorView || !undo(editorView)) setSaveState("没有可撤销的修改"); else setSaveState("已撤销", "ok"); }
+function redoEditor() { if (!editorView || !redo(editorView)) setSaveState("没有可恢复的修改"); else setSaveState("已恢复撤销", "ok"); }
 function normalisePath(path) { return path.replaceAll("\\", "/"); }
 function fileName(path) { return normalisePath(path).split("/").pop(); }
 function parentPath(path) { return normalisePath(path).split("/").slice(0, -1).join("/"); }
@@ -271,10 +553,7 @@ async function selectDocument(path, rootPath = null) {
   state.current = doc;
   state.activeRoot = root?.path || null;
   state.selectedFolder = parentPath(doc.path); openParentFolders(doc.path, root?.path);
-  ui.editor.value = doc.content;
-  renderEditorHighlights();
-  resetHistory(doc.content);
-  ui.editor.disabled = false;
+  setEditorDocument(doc.content);
   ui.currentPath.textContent = root ? relativeToRoot(doc.path, root.path) || fileName(doc.path) : doc.relativePath || fileName(doc.path);
   setDirty(false); renderTree(); await renderPreview();
   void rememberRecent("file", doc.path);
@@ -283,14 +562,11 @@ async function selectDocument(path, rootPath = null) {
 async function createUntitledDocument() {
   if (!confirmDiscardChanges()) return;
   state.current = { path: null, relativePath: "未命名.md", content: "", isUntitled: true };
-  ui.editor.value = "";
-  renderEditorHighlights();
-  resetHistory("");
-  ui.editor.disabled = false;
+  setEditorDocument("");
   ui.currentPath.textContent = "未命名.md";
   setDirty(false); renderTree(); await renderPreview();
   setSaveState("新建了未命名文档；按 ⌘S / Ctrl+S 选择保存目录", "ok");
-  ui.editor.focus();
+  focusEditor();
 }
 
 function renderTree() {
@@ -439,7 +715,7 @@ function scrollToAnchor(hash) {
 async function renderPreview() {
   if (!state.current) return;
   ui.previewState.textContent = "渲染中…";
-  const { text, blocks } = protectFences(ui.editor.value);
+  const { text, blocks } = protectFences(editorValue());
   ui.preview.innerHTML = restoreBlocks(marked.parse(text.replace(/<table\b/gi, '<table data-feishu-table'), { gfm: true, breaks: true }), blocks);
   clearPreviewFindHighlights(); sanitize(ui.preview); processRawCells(ui.preview, blocks); sanitize(ui.preview); addHeadingIds(ui.preview); renderDocumentOutline(); wrapTables(ui.preview); state.previewMatch = null; await hydrateLocalImages();
   const diagrams = [...ui.preview.querySelectorAll(".mermaid")];
@@ -474,7 +750,7 @@ async function checkDiskVersion(manual = false) {
     try {
       const diskDocument = await invoke("read_markdown_file", { path: current.path });
       if (state.current !== current || normalisePath(diskDocument.path) !== normalisePath(current.path)) return true;
-      const softwareContent = ui.editor.value;
+      const softwareContent = editorValue();
       if (diskDocument.content === softwareContent) {
         const changed = current.content !== diskDocument.content;
         current.content = diskDocument.content;
@@ -507,11 +783,10 @@ async function resolveReloadConflict(action) {
       const diskDocument = await invoke("read_markdown_file", { path: conflict.path });
       if (normalisePath(state.current?.path || "") !== conflict.path) return;
       state.current.content = diskDocument.content;
-      ui.editor.value = diskDocument.content;
-      renderEditorHighlights(); resetHistory(diskDocument.content); setDirty(false);
+      setEditorDocument(diskDocument.content); setDirty(false);
       closeReloadConflict(); await renderPreview(); setSaveState("已重新载入磁盘内容", "ok");
     } else if (action === "software") {
-      const softwareContent = ui.editor.value;
+      const softwareContent = editorValue();
       await invoke("save_markdown_file", { path: conflict.path, content: softwareContent });
       if (normalisePath(state.current?.path || "") !== conflict.path) return;
       state.current.content = softwareContent; setDirty(false); closeReloadConflict(); setSaveState("已用软件内容覆盖磁盘文件", "ok");
@@ -534,14 +809,14 @@ async function saveCurrent() {
     if (!state.current.path) {
       const destination = await save({ defaultPath: state.current.relativePath || "未命名.md", filters: [{ name: "Markdown", extensions: ["md", "markdown"] }], title: "保存 Markdown 文档" });
       if (!destination) { setSaveState("已取消保存", ""); return false; }
-      const document = await invoke("save_markdown_file_as", { path: destination, content: ui.editor.value });
+      const document = await invoke("save_markdown_file_as", { path: destination, content: editorValue() });
       const savedPath = normalisePath(document.path);
       const root = workspaceForPath(savedPath) || createWorkspace(parentPath(savedPath), "files");
       state.current = addDocument(root, document);
       state.activeRoot = root.path; state.selectedFolder = parentPath(savedPath); openParentFolders(savedPath, root.path); renderTree();
     } else {
-      await invoke("save_markdown_file", { path: state.current.path, content: ui.editor.value });
-      state.current.content = ui.editor.value;
+      await invoke("save_markdown_file", { path: state.current.path, content: editorValue() });
+      state.current.content = editorValue();
     }
     setDirty(false); setSaveState("已保存", "ok"); return true;
   } catch (error) { void reportAppError("document-save", error); setSaveState(`保存失败：${error}`, "error"); return false; }
@@ -568,7 +843,7 @@ function firstOpenDocument() {
   return null;
 }
 function clearDocumentView(message) {
-  ui.editor.value = ""; renderEditorHighlights(); ui.editor.disabled = true; ui.currentPath.textContent = "请选择 Markdown 文件";
+  setEditorDocument("", true); ui.currentPath.textContent = "请选择 Markdown 文件";
   ui.preview.innerHTML = '<div class="empty">预览会显示在这里。</div>'; renderDocumentOutline(); ui.previewState.textContent = ""; renderTree(); setSaveState(message, "ok");
 }
 async function closeDocument(path, rootPath) {
@@ -598,22 +873,29 @@ async function closeWorkspace(rootPath) {
 
 function isPreviewMode() { return ui.workspace.dataset.mode === "preview"; }
 function mountFindReplace() {
-  const previewMode = isPreviewMode(), pane = previewMode ? ui.preview.closest(".preview-pane") : ui.editor.closest(".editor-pane");
-  if (previewMode) pane.insertBefore(ui.findReplaceModal, ui.preview); else pane.append(ui.findReplaceModal);
-  ui.findReplaceModal.dataset.preview = String(previewMode);
-  ui.findReplaceModal.setAttribute("aria-label", previewMode ? "预览查找" : "查找和替换");
+  const previewContent = ui.preview.closest(".preview-content");
+  previewContent.insertBefore(ui.findReplaceModal, ui.preview);
+  ui.findReplaceModal.dataset.preview = "true";
+  ui.findReplaceModal.setAttribute("aria-label", "预览查找");
 }
-function setMode(mode) { ui.workspace.dataset.mode = mode; if (!ui.findReplaceModal.hidden) mountFindReplace(); renderEditorHighlights(); document.querySelectorAll("[data-mode]").forEach(button => button.classList.toggle("active", button.dataset.mode === mode)); }
+function setMode(mode) {
+  ui.workspace.dataset.mode = mode;
+  if (!ui.findReplaceModal.hidden && mode !== "preview") closeFindReplace();
+  document.querySelectorAll("[data-mode]").forEach(button => button.classList.toggle("active", button.dataset.mode === mode));
+}
 function openFindReplace() {
   if (!state.current) { setSaveState("请先打开一个 Markdown 文件", "error"); return; }
+  if (!isPreviewMode()) {
+    openSearchPanel(editorView);
+    return;
+  }
   mountFindReplace();
   ui.findReplaceModal.hidden = false;
-  renderEditorHighlights();
   ui.findText.focus();
   ui.findText.select();
   updateFindStatus();
 }
-function closeFindReplace() { clearPreviewFindHighlights(); ui.findReplaceModal.hidden = true; renderEditorHighlights(); if (!isPreviewMode()) ui.editor.focus(); }
+function closeFindReplace() { clearPreviewFindHighlights(); ui.findReplaceModal.hidden = true; }
 function openCreate(kind) {
   const workspace = state.selectedFolder && workspaceForPath(state.selectedFolder);
   if (!workspace || !state.selectedFolder) { setSaveState("请先打开一个 Markdown 文档目录", "error"); return; }
@@ -642,22 +924,9 @@ function findOccurrences(source, text) {
   while ((position = source.indexOf(text, position)) !== -1) { count += 1; position += text.length; }
   return count;
 }
-function renderEditorHighlights() {
-  const source = ui.editor.value, query = !ui.findReplaceModal.hidden && !isPreviewMode() ? ui.findText.value : "", fragment = document.createDocumentFragment();
-  if (!query) { fragment.append(document.createTextNode(source)); }
-  else {
-    let offset = 0, position;
-    while ((position = source.indexOf(query, offset)) !== -1) {
-      if (position > offset) fragment.append(document.createTextNode(source.slice(offset, position)));
-      const mark = document.createElement("mark"); mark.textContent = query; fragment.append(mark); offset = position + query.length;
-    }
-    if (offset < source.length) fragment.append(document.createTextNode(source.slice(offset)));
-  }
-  ui.editorHighlights.replaceChildren(fragment); ui.editorHighlights.scrollTop = ui.editor.scrollTop; ui.editorHighlights.scrollLeft = ui.editor.scrollLeft;
-}
 function updateFindStatus(message = "") {
-  const query = ui.findText.value, content = isPreviewMode() ? ui.preview.textContent : ui.editor.value, scope = isPreviewMode() ? "预览" : "当前文件";
-  ui.findStatus.textContent = message || (query ? `${scope}中找到 ${findOccurrences(content, query)} 处（区分大小写）。` : `在${scope}中查找（区分大小写）。`);
+  const query = ui.findText.value, content = ui.preview.textContent;
+  ui.findStatus.textContent = message || (query ? `预览中找到 ${findOccurrences(content, query)} 处（区分大小写）。` : "在预览中查找（区分大小写）。");
 }
 function previewTextEntries() {
   const walker = document.createTreeWalker(ui.preview, NodeFilter.SHOW_TEXT), entries = [];
@@ -714,43 +983,7 @@ function findPreviewMatch(direction = 1) {
   return true;
 }
 function findMatch(direction = 1) {
-  if (isPreviewMode()) return findPreviewMatch(direction);
-  const query = ui.findText.value, content = ui.editor.value;
-  if (!query) { updateFindStatus("请输入要查找的文字。"); return false; }
-  const activeInput = findFocusTarget();
-  const anchor = direction > 0 ? ui.editor.selectionEnd : Math.max(0, ui.editor.selectionStart - 1);
-  let position = direction > 0 ? content.indexOf(query, anchor) : content.lastIndexOf(query, anchor);
-  const wrapped = position === -1;
-  if (wrapped) position = direction > 0 ? content.indexOf(query) : content.lastIndexOf(query);
-  if (position === -1) { updateFindStatus("当前文件没有匹配内容。"); return false; }
-  // 从查找栏触发时不切走焦点；textarea 仍可在未聚焦状态设置选区和滚动位置。
-  if (!activeInput) ui.editor.focus();
-  ui.editor.setSelectionRange(position, position + query.length);
-  const line = content.slice(0, position).split("\n").length - 1;
-  const lineHeight = Number.parseFloat(getComputedStyle(ui.editor).lineHeight) || 21;
-  ui.editor.scrollTop = Math.max(0, line * lineHeight - ui.editor.clientHeight / 2);
-  updateFindStatus(`${wrapped ? "已回到" : "定位到"}第 ${findOccurrences(content.slice(0, position + query.length), query)} / ${findOccurrences(content, query)} 处。`);
-  return true;
-}
-function notifyEditorChange() { ui.editor.dispatchEvent(new Event("input", { bubbles: true })); }
-function replaceCurrent() {
-  const query = ui.findText.value, replacement = ui.replaceText.value;
-  if (!query) { updateFindStatus("请输入要查找的文字。"); return; }
-  const { selectionStart: start, selectionEnd: end, value } = ui.editor;
-  if (value.slice(start, end) !== query && !findMatch(1)) return;
-  const selectedStart = ui.editor.selectionStart;
-  ui.editor.setRangeText(replacement, selectedStart, ui.editor.selectionEnd, "select");
-  notifyEditorChange();
-  updateFindStatus("已替换当前匹配项。");
-}
-function replaceAll() {
-  const query = ui.findText.value, replacement = ui.replaceText.value, content = ui.editor.value;
-  const count = findOccurrences(content, query);
-  if (!query) { updateFindStatus("请输入要查找的文字。"); return; }
-  if (!count) { updateFindStatus("当前文件没有匹配内容。"); return; }
-  ui.editor.value = content.split(query).join(replacement);
-  notifyEditorChange();
-  updateFindStatus(`已替换 ${count} 处。`);
+  return findPreviewMatch(direction);
 }
 function imageFile(file) { return file && (file.type.startsWith("image/") || /\.(png|jpe?g|gif|webp|svg|bmp)$/i.test(file.name)); }
 function readAsDataUrl(file) {
@@ -776,11 +1009,10 @@ async function selectImages() {
 }
 function insertImageMarkdown(relativePath, name) {
   const alt = name.replace(/\.[^.]+$/, "").replace(/[\[\]\\]/g, "") || "图片";
-  const { selectionStart: start, selectionEnd: end, value } = ui.editor;
+  const { start, end } = editorSelection(), value = editorValue();
   const before = start && !value.slice(0, start).endsWith("\n") ? "\n" : "";
   const after = end < value.length && !value.slice(end).startsWith("\n") ? "\n" : "";
-  ui.editor.setRangeText(`${before}![${alt}](${encodeURI(relativePath).replace(/#/g, "%23")})${after}`, start, end, "end");
-  notifyEditorChange();
+  replaceEditorSelection(`${before}![${alt}](${encodeURI(relativePath).replace(/#/g, "%23")})${after}`);
 }
 async function importImagePath(sourcePath) {
   if (!state.current?.path || !/\.(png|jpe?g|gif|webp|svg|bmp)$/i.test(sourcePath)) return;
@@ -810,12 +1042,13 @@ async function pasteClipboardContent(fallbackText = "") {
 }
 function insertPlainText(text) {
   if (!text) return;
-  ui.editor.setRangeText(text, ui.editor.selectionStart, ui.editor.selectionEnd, "end"); notifyEditorChange();
+  replaceEditorSelection(text);
 }
 async function copySelection() {
-  const editorText = ui.editor.value.slice(ui.editor.selectionStart, ui.editor.selectionEnd);
+  const { start, end } = editorSelection();
+  const editorText = editorValue().slice(start, end);
   const previewText = window.getSelection?.().toString() || "";
-  const text = document.activeElement === ui.editor ? editorText : previewText;
+  const text = editorHasFocus() ? editorText : previewText;
   if (!text) { setSaveState("请先选中要复制的内容", "error"); return; }
   try { await invoke("copy_markdown_text", { text }); setSaveState("已复制选中内容", "ok"); }
   catch (error) { void reportAppError("copy-selection", error); setSaveState(`复制失败：${error}`, "error"); }
@@ -844,11 +1077,9 @@ function applyFullscreenZoom(next, clientX = null, clientY = null) {
 }
 function closeFullscreen() { if (!state.fullscreen) return; const { diagram, parent, next } = state.fullscreen; parent.insertBefore(diagram, next); state.fullscreen = null; ui.modalCanvas.classList.remove("panning"); ui.mermaidModal.hidden = true; document.body.classList.remove("modal-open"); }
 
-ui.editor.addEventListener("input", () => { if (!state.current) return; recordEditorHistory(); renderEditorHighlights(); setDirty(true); renderPreview(); });
 ui.outlineToggle.addEventListener("click", () => setDocumentOutlineCollapsed(!ui.preview.closest(".preview-pane").classList.contains("outline-collapsed")));
 ui.themeToggle.addEventListener("click", () => applyTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark"));
-ui.editor.addEventListener("scroll", () => { ui.editorHighlights.scrollTop = ui.editor.scrollTop; ui.editorHighlights.scrollLeft = ui.editor.scrollLeft; });
-ui.editor.addEventListener("paste", event => {
+function handleEditorPaste(event) {
   state.pasteShortcutToken = null;
   const files = [...(event.clipboardData?.files || [])].filter(imageFile);
   if (!files.length) files.push(...[...(event.clipboardData?.items || [])].filter(item => item.kind === "file" && item.type.startsWith("image/")).map(item => item.getAsFile()).filter(imageFile));
@@ -863,17 +1094,18 @@ ui.editor.addEventListener("paste", event => {
     pasteClipboardContent(text); return;
   }
   if (text) { insertPlainText(text); return; }
-});
+}
 function queuePasteShortcutFallback() {
   const token = Symbol("paste-shortcut");
   state.pasteShortcutToken = token;
   window.setTimeout(() => {
-    if (state.pasteShortcutToken !== token || document.activeElement !== ui.editor) return;
+    if (state.pasteShortcutToken !== token || !editorHasFocus()) return;
     state.pasteShortcutToken = null;
     void reportAppError("clipboard-shortcut-fallback", "⌘V / Ctrl+V 未触发 WebView paste 事件，改用原生剪贴板读取");
     pasteClipboardContent();
   }, 180);
 }
+createMarkdownEditor();
 getCurrentWindow().onDragDropEvent(event => {
   const pane = ui.editor.closest(".editor-pane");
   if (event.payload.type === "enter" || event.payload.type === "over") pane.classList.add("dragging");
@@ -933,13 +1165,11 @@ ui.findReplaceModal.addEventListener("click", event => {
   if (action === "close") closeFindReplace();
   else if (action === "next") { findMatch(1); ui.findText.focus(); }
   else if (action === "previous") { findMatch(-1); ui.findText.focus(); }
-  else if (action === "replace") { replaceCurrent(); ui.replaceText.focus(); }
-  else if (action === "replace-all") { replaceAll(); ui.replaceText.focus(); }
 });
 ui.createModal.addEventListener("click", event => { const action = event.target.dataset.createAction; if (event.target === ui.createModal || action === "close") closeCreate(); else if (action === "confirm") createEntry(); });
 ui.reloadModal.addEventListener("click", event => { const action = event.target.dataset.reloadAction; if (action) resolveReloadConflict(action); });
 ui.createName.addEventListener("keydown", event => { if (event.key === "Enter") { event.preventDefault(); createEntry(); } });
-ui.findText.addEventListener("input", () => { clearPreviewFindHighlights(); state.previewMatch = null; renderEditorHighlights(); updateFindStatus(); });
+ui.findText.addEventListener("input", () => { clearPreviewFindHighlights(); state.previewMatch = null; updateFindStatus(); });
 async function pasteIntoFindInput(input) {
   try {
     const text = await invoke("read_clipboard_text");
@@ -967,8 +1197,12 @@ function handleFindInputKeydown(event, input) {
 }
 [ui.findText, ui.replaceText].forEach(input => input.addEventListener("paste", () => { state.findPasteToken = null; }));
 ui.findText.addEventListener("keydown", event => { if (isImeComposing(event)) return; handleFindInputKeydown(event, ui.findText); if (event.key === "Enter") { event.preventDefault(); findMatch(event.shiftKey ? -1 : 1); } });
-ui.replaceText.addEventListener("keydown", event => { if (isImeComposing(event)) return; handleFindInputKeydown(event, ui.replaceText); if (event.key === "Enter") { event.preventDefault(); replaceCurrent(); } });
+ui.replaceText.addEventListener("keydown", event => { if (isImeComposing(event)) return; handleFindInputKeydown(event, ui.replaceText); });
 document.querySelectorAll("[data-mode]").forEach(button => button.addEventListener("click", () => setMode(button.dataset.mode)));
+document.addEventListener("pointerdown", event => { if (selectionFormatMenu && !selectionFormatMenu.contains(event.target)) closeSelectionFormatMenu(); });
+document.addEventListener("scroll", closeSelectionFormatMenu, true);
+window.addEventListener("blur", closeSelectionFormatMenu);
+window.addEventListener("resize", closeSelectionFormatMenu);
 listen("menu-action", event => {
   if (state.reloadConflict) return;
   switch (event.payload) {
@@ -1002,13 +1236,9 @@ document.addEventListener("keydown", event => {
   if (isImeComposing(event)) return;
   if (state.reloadConflict && shortcut) { event.preventDefault(); return; }
   if (event.key === "Escape") { if (!ui.findReplaceModal.hidden) closeFindReplace(); else closeFullscreen(); }
-  if (!ui.findReplaceModal.hidden && document.activeElement === ui.editor && event.key === "ArrowDown") { event.preventDefault(); findMatch(1); }
-  if (!ui.findReplaceModal.hidden && document.activeElement === ui.editor && event.key === "ArrowUp") { event.preventDefault(); findMatch(-1); }
-  const selectedFindText = ui.editor.value.slice(ui.editor.selectionStart, ui.editor.selectionEnd);
-  if (!ui.findReplaceModal.hidden && document.activeElement === ui.editor && event.key === "Enter" && ui.findText.value && selectedFindText === ui.findText.value) { event.preventDefault(); findMatch(event.shiftKey ? -1 : 1); ui.findText.focus(); }
-  if (shortcut && key === "v" && document.activeElement === ui.editor) queuePasteShortcutFallback();
+  if (shortcut && key === "v" && editorHasFocus()) queuePasteShortcutFallback();
   if (shortcut && key === "s") { event.preventDefault(); saveCurrent(); }
-  if (shortcut && (key === "f" || key === "h")) { event.preventDefault(); openFindReplace(); }
+  if (shortcut && (key === "f" || key === "h") && isPreviewMode()) { event.preventDefault(); openFindReplace(); }
 });
 applyTheme(automaticTheme());
 scheduleAutomaticTheme();

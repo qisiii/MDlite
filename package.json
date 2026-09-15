@@ -18,9 +18,15 @@
     "release:major": "node scripts/release.mjs major"
   },
   "dependencies": {
+    "@codemirror/autocomplete": "^6.20.3",
+    "@codemirror/commands": "^6.11.0",
+    "@codemirror/lang-markdown": "^6.5.2",
+    "@codemirror/search": "^6.7.2",
+    "@codemirror/state": "^6.7.4",
     "@tauri-apps/api": "^2.0.0",
     "@tauri-apps/plugin-clipboard-manager": "^2.3.3",
     "@tauri-apps/plugin-dialog": "^2.0.0",
+    "codemirror": "^6.0.2",
     "marked": "^15.0.0",
     "mermaid": "^11.0.0"
   },

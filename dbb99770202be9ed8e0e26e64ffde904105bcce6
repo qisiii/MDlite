@@ -1,0 +1,29 @@
+package.json
+  4c73607a76ed8034 21-25,29
+index.html
+  4c73607a76ed8034 36
+src/style.css
+  4c73607a76ed8034 4-42,107-127
+src/main.js
+  4c73607a76ed8034 7-12,17-20,71-110,112-377,556,565,569,718,753,786,789,812,818-819,846,876-884,888-891,898,928-929,986,1012,1015,1045,1048-1049,1051,1082,1097,1102,1108,1172,1200,1202-1205,1239,1241
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.7",
+  "base_commit_sha": "dbb99770202be9ed8e0e26e64ffde904105bcce6",
+  "prompts": {
+    "4c73607a76ed8034": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "conv_20260915_codemirror_search",
+        "model": "gpt-5"
+      },
+      "human_author": "qisiii",
+      "messages": [],
+      "total_additions": 430,
+      "total_deletions": 136,
+      "accepted_lines": 430,
+      "overriden_lines": 0
+    }
+  }
+}

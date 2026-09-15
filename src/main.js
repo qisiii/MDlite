@@ -2,6 +2,8 @@ import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open, save } from "@tauri-apps/plugin-dialog";
+import DOMPurify from "dompurify";
+import hljs from "highlight.js/lib/common";
 import { marked } from "marked";
 import mermaid from "mermaid";
 import { basicSetup, EditorView } from "codemirror";
@@ -10,6 +12,7 @@ import { undo, redo } from "@codemirror/commands";
 import { markdown } from "@codemirror/lang-markdown";
 import { closeSearchPanel, findNext, findPrevious, getSearchQuery, openSearchPanel, replaceAll, replaceNext, search, SearchQuery, setSearchQuery } from "@codemirror/search";
 import { autocompletion, snippetCompletion } from "@codemirror/autocomplete";
+import "highlight.js/styles/github-dark.css";
 import "./style.css";
 
 const APP_VERSION = __APP_VERSION__;
@@ -20,6 +23,38 @@ let editorView = null;
 let selectionFormatMenu = null;
 let folderContextMenu = null;
 mermaid.initialize({ startOnLoad: false, securityLevel: "strict", theme: "neutral" });
+const SANITIZE_CONFIG = {
+  ALLOWED_TAGS: ["a", "blockquote", "br", "code", "del", "div", "em", "h1", "h2", "h3", "h4", "h5", "h6", "hr", "img", "input", "li", "ol", "p", "pre", "span", "strong", "table", "tbody", "td", "tfoot", "th", "thead", "tr", "ul"],
+  ALLOWED_ATTR: ["align", "alt", "checked", "class", "colspan", "data-feishu-table", "disabled", "href", "rowspan", "scope", "src", "start", "title", "type"],
+  ALLOW_ARIA_ATTR: false,
+  ALLOW_DATA_ATTR: false,
+  ALLOW_UNKNOWN_PROTOCOLS: false,
+  FORBID_ATTR: ["style"],
+  FORBID_TAGS: ["script", "style", "template"]
+};
+DOMPurify.addHook("uponSanitizeAttribute", (_node, data) => {
+  if (data.attrName === "src" && /^data:/i.test(data.attrValue) && !/^data:image\/(?:bmp|gif|jpe?g|png|webp);base64,/i.test(data.attrValue)) data.keepAttr = false;
+});
+marked.use({
+  gfm: true,
+  breaks: true,
+  renderer: {
+    code({ text, lang }) {
+      const language = (lang || "").trim().split(/\s+/, 1)[0].toLowerCase();
+      if (language === "mermaid") return `<div class="mermaid-box"><div class="mermaid">${escapeHtml(text)}</div></div>\n`;
+      const safeLanguage = /^[a-z0-9_+-]+$/i.test(language) ? language : "";
+      let contents = escapeHtml(text);
+      let highlighted = false;
+      if (safeLanguage && hljs.getLanguage(safeLanguage)) {
+        try { contents = hljs.highlight(text, { language: safeLanguage, ignoreIllegals: true }).value; highlighted = true; }
+        catch (error) { void reportAppError("code-highlight", error); }
+      }
+      const classes = [safeLanguage && `language-${safeLanguage}`, highlighted && "hljs"].filter(Boolean).join(" ");
+      return `<pre><code${classes ? ` class="${classes}"` : ""}>${contents}</code></pre>\n`;
+    },
+    html({ text }) { return text.replace(/<table\b/gi, '<table data-feishu-table="true"'); }
+  }
+});
 ui.appVersion.textContent = `v${APP_VERSION}`;
 
 async function reportAppError(category, error) {
@@ -674,38 +709,27 @@ function renderTree() {
   persistWorkspaceSession();
 }
 
-function protectFences(source) {
-  const blocks = [];
-  const text = source.replace(/(^|\n)```([^\n`]*)\n([\s\S]*?)\n```(?=\n|$)/g, (_, prefix, language, code) => `${prefix}@@FMS_BLOCK_${blocks.push({ language: language.trim().toLowerCase(), code }) - 1}@@`);
-  return { text, blocks };
-}
 function escapeHtml(value) { return value.replace(/[&<>'"]/g, char => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" })[char]); }
-function restoreBlocks(html, blocks) {
-  return html.replace(/@@FMS_BLOCK_(\d+)@@/g, (_, index) => {
-    const block = blocks[Number(index)];
-    if (block.language === "mermaid") return `<div class="mermaid-box"><button class="fullscreen-chart" data-mermaid-fullscreen>全屏查看</button><div class="mermaid">${escapeHtml(block.code)}</div></div>`;
-    return `<pre><code>${escapeHtml(block.code)}</code></pre>`;
-  });
-}
-function sanitize(root) {
+function sanitizeHtml(html) { return DOMPurify.sanitize(html, SANITIZE_CONFIG); }
+function renderMarkdown(source) { return marked.parse(source); }
+function prepareTaskLists(root) {
   root.querySelectorAll("input").forEach(input => {
     const isReadOnlyTask = input.matches('li > input[type="checkbox"][disabled]');
     if (!isReadOnlyTask) { input.remove(); return; }
-    [...input.attributes].forEach(attr => {
-      if (!["type", "checked", "disabled"].includes(attr.name.toLowerCase())) input.removeAttribute(attr.name);
-    });
     input.parentElement.classList.add("task-list-item");
     input.closest("ul,ol")?.classList.add("task-list");
   });
-  root.querySelectorAll("script,iframe,object,embed,base,link,meta,form,button").forEach(node => { if (!node.matches(".fullscreen-chart")) node.remove(); });
-  root.querySelectorAll("*").forEach(node => [...node.attributes].forEach(attr => {
-    const name = attr.name.toLowerCase(), value = attr.value.trim().toLowerCase();
-    if (name.startsWith("on") || ((name === "href" || name === "src") && /^(javascript|data:text\/html):/.test(value))) node.removeAttribute(attr.name);
-  }));
 }
-function processRawCells(root, blocks) {
+function processRawCells(root) {
   root.querySelectorAll("table[data-feishu-table] td, table[data-feishu-table] th").forEach(cell => {
-    if (cell.innerHTML.trim()) cell.innerHTML = restoreBlocks(marked.parse(cell.innerHTML, { gfm: true, breaks: true }), blocks);
+    if (cell.innerHTML.trim()) cell.innerHTML = sanitizeHtml(renderMarkdown(cell.innerHTML));
+  });
+}
+function prepareMermaidBlocks(root) {
+  root.querySelectorAll(".mermaid-box > .mermaid").forEach(diagram => {
+    const button = document.createElement("button");
+    button.type = "button"; button.className = "fullscreen-chart"; button.dataset.mermaidFullscreen = ""; button.textContent = "全屏查看";
+    diagram.before(button);
   });
 }
 function wrapTables(root) { root.querySelectorAll("table").forEach(table => { const wrap = document.createElement("div"); wrap.className = "table-wrap"; table.before(wrap); wrap.append(table); }); }
@@ -774,9 +798,8 @@ function scrollToAnchor(hash) {
 async function renderPreview() {
   if (!state.current) return;
   ui.previewState.textContent = "渲染中…";
-  const { text, blocks } = protectFences(editorValue());
-  ui.preview.innerHTML = restoreBlocks(marked.parse(text.replace(/<table\b/gi, '<table data-feishu-table'), { gfm: true, breaks: true }), blocks);
-  clearPreviewFindHighlights(); sanitize(ui.preview); processRawCells(ui.preview, blocks); sanitize(ui.preview); addHeadingIds(ui.preview); renderDocumentOutline(); wrapTables(ui.preview); state.previewMatch = null; await hydrateLocalImages();
+  ui.preview.innerHTML = sanitizeHtml(renderMarkdown(editorValue()));
+  clearPreviewFindHighlights(); processRawCells(ui.preview); ui.preview.innerHTML = sanitizeHtml(ui.preview.innerHTML); prepareTaskLists(ui.preview); prepareMermaidBlocks(ui.preview); addHeadingIds(ui.preview); renderDocumentOutline(); wrapTables(ui.preview); state.previewMatch = null; await hydrateLocalImages();
   const diagrams = [...ui.preview.querySelectorAll(".mermaid")];
   if (diagrams.length) { diagrams.forEach(node => node.id = `mermaid-${++state.mermaidSequence}`); try { await mermaid.run({ nodes: diagrams }); } catch (error) { void reportAppError("mermaid-render", error); ui.previewState.textContent = "部分 Mermaid 图显示源码"; return; } }
   ui.previewState.textContent = "";

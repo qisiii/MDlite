@@ -1,6 +1,6 @@
 [package]
 name = "mdlite"
-version = "0.1.19"
+version = "0.1.20"
 description = "Local Feishu-compatible Markdown editor and previewer"
 authors = ["YOCA"]
 edition = "2021"

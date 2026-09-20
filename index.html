@@ -33,6 +33,16 @@
             <button data-find-action="previous" title="上一处">↑</button><button data-find-action="next" title="下一处">↓</button><button data-find-action="replace" data-find-edit-only>替换</button><button data-find-action="replace-all" data-find-edit-only>全部替换</button><button data-find-action="close" title="关闭">×</button>
             <span id="findStatus">在当前文件中查找。</span>
           </section>
+          <section id="tableTools" class="table-tools" hidden role="toolbar" aria-label="Markdown 表格操作">
+            <span class="table-tools-label">表格</span>
+            <button type="button" data-table-action="row-after" title="在当前行下方新增一行">＋行</button>
+            <button type="button" data-table-action="row-delete" title="删除当前数据行">－行</button>
+            <span class="table-tools-divider" aria-hidden="true"></span>
+            <button type="button" data-table-action="column-after" title="在当前列右侧新增一列">＋列</button>
+            <button type="button" data-table-action="column-delete" title="删除当前列">－列</button>
+            <span class="table-tools-divider" aria-hidden="true"></span>
+            <button type="button" data-table-action="format" class="table-tools-format" title="统一对齐表格竖线与分隔线">自动对齐</button>
+          </section>
           <div id="editor" aria-label="Markdown 编辑器"></div>
         </section>
         <section class="preview-pane">
@@ -61,6 +71,14 @@
         <label>名称<input id="createName" type="text" autocomplete="off" placeholder="例如：接口说明" /></label>
         <p id="createTarget"></p>
         <footer><button data-create-action="close">取消</button><button data-create-action="confirm" class="primary">新建</button></footer>
+      </div>
+    </section>
+    <section id="globalSearchModal" hidden aria-modal="true" role="dialog" aria-labelledby="globalSearchTitle">
+      <div class="find-dialog global-search-dialog">
+        <header><strong id="globalSearchTitle">在目录中搜索</strong><span class="grow"></span><button data-global-search-action="close">关闭</button></header>
+        <label>关键词<input id="globalSearchText" type="search" autocomplete="off" placeholder="搜索文件名和正文…" /></label>
+        <div id="globalSearchResults" class="global-search-results" role="listbox" aria-label="搜索结果"></div>
+        <p id="globalSearchStatus" class="global-search-status">输入关键词开始搜索。</p>
       </div>
     </section>
     <section id="reloadModal" hidden aria-modal="true" role="alertdialog" aria-labelledby="reloadTitle" aria-describedby="reloadMessage">

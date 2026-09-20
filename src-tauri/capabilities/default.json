@@ -3,5 +3,5 @@
   "identifier": "main-capability",
   "description": "Allows the main window to choose local Markdown files and folders.",
   "windows": ["main"],
-  "permissions": ["core:default", "dialog:default", "clipboard-manager:allow-read-image", "clipboard-manager:allow-read-text", "clipboard-manager:allow-write-text"]
+  "permissions": ["core:default", "dialog:default", "opener:default", "clipboard-manager:allow-read-image", "clipboard-manager:allow-read-text", "clipboard-manager:allow-write-text"]
 }

@@ -2,37 +2,45 @@ import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open, save } from "@tauri-apps/plugin-dialog";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import DOMPurify from "dompurify";
 import hljs from "highlight.js/lib/common";
 import { marked } from "marked";
 import mermaid from "mermaid";
+import katex from "katex";
 import { basicSetup, EditorView } from "codemirror";
 import { EditorState } from "@codemirror/state";
+import { keymap } from "@codemirror/view";
 import { undo, redo } from "@codemirror/commands";
 import { markdown } from "@codemirror/lang-markdown";
 import { closeSearchPanel, findNext, findPrevious, getSearchQuery, openSearchPanel, replaceAll, replaceNext, search, SearchQuery, setSearchQuery } from "@codemirror/search";
 import { autocompletion, snippetCompletion } from "@codemirror/autocomplete";
 import "highlight.js/styles/github-dark.css";
+import "katex/dist/katex.min.css";
 import "./style.css";
 
 const APP_VERSION = __APP_VERSION__;
 const APP_NAME = __APP_NAME__;
-const ui = Object.fromEntries(["appVersion", "saveState", "fileTree", "fileCount", "recentList", "editor", "currentPath", "dirtyMark", "preview", "previewState", "workspace", "documentOutline", "outlineToggle", "themeToggle", "mermaidModal", "modalCanvas", "modalZoom", "findReplaceModal", "findText", "replaceText", "findStatus", "createModal", "createTitle", "createName", "createTarget", "reloadModal", "reloadFileName", "reloadMessage"].map(id => [id, document.getElementById(id)]));
-const state = { roots: new Map(), docs: new Map(), recentDocuments: [], selectedFolder: null, activeRoot: null, expandedFolders: new Set(), current: null, dirty: false, mermaidSequence: 0, fullscreen: null, createKind: null, pasteShortcutToken: null, findPasteToken: null, previewMatch: null, reloadCheckPromise: null, reloadConflict: null, restoringSession: false, sessionSaveQueue: Promise.resolve(), themeTimer: null };
+const ui = Object.fromEntries(["appVersion", "saveState", "fileTree", "fileCount", "recentList", "editor", "currentPath", "dirtyMark", "preview", "previewState", "workspace", "documentOutline", "outlineToggle", "themeToggle", "mermaidModal", "modalCanvas", "modalZoom", "findReplaceModal", "findText", "replaceText", "findStatus", "tableTools", "createModal", "createTitle", "createName", "createTarget", "globalSearchModal", "globalSearchText", "globalSearchResults", "globalSearchStatus", "reloadModal", "reloadFileName", "reloadMessage"].map(id => [id, document.getElementById(id)]));
+const state = { roots: new Map(), docs: new Map(), recentDocuments: [], selectedFolder: null, activeRoot: null, expandedFolders: new Set(), current: null, dirty: false, mermaidSequence: 0, fullscreen: null, createKind: null, pasteShortcutToken: null, findPasteToken: null, previewMatch: null, reloadCheckPromise: null, reloadConflict: null, restoringSession: false, sessionSaveQueue: Promise.resolve(), themeTimer: null, autoSaveTimer: null };
 let editorView = null;
 let selectionFormatMenu = null;
 let folderContextMenu = null;
-mermaid.initialize({ startOnLoad: false, securityLevel: "strict", theme: "neutral" });
+const MERMAID_GANTT_CONFIG = { useWidth: 900, useMaxWidth: false };
+mermaid.initialize({ startOnLoad: false, securityLevel: "strict", theme: "neutral", gantt: MERMAID_GANTT_CONFIG });
 const SANITIZE_CONFIG = {
-  ALLOWED_TAGS: ["a", "blockquote", "br", "code", "del", "div", "em", "h1", "h2", "h3", "h4", "h5", "h6", "hr", "img", "input", "li", "ol", "p", "pre", "span", "strong", "table", "tbody", "td", "tfoot", "th", "thead", "tr", "ul"],
-  ALLOWED_ATTR: ["align", "alt", "checked", "class", "colspan", "data-feishu-table", "disabled", "href", "rowspan", "scope", "src", "start", "title", "type"],
+  ALLOWED_TAGS: ["a", "blockquote", "br", "code", "del", "details", "div", "em", "h1", "h2", "h3", "h4", "h5", "h6", "hr", "img", "input", "kbd", "li", "mark", "nav", "ol", "p", "pre", "section", "small", "span", "strong", "sub", "summary", "sup", "table", "tbody", "td", "tfoot", "th", "thead", "tr", "u", "ul"],
+  ALLOWED_ATTR: ["align", "alt", "checked", "class", "colspan", "data-feishu-table", "disabled", "height", "href", "id", "name", "open", "rowspan", "scope", "src", "start", "style", "title", "type", "width"],
   ALLOW_ARIA_ATTR: false,
   ALLOW_DATA_ATTR: false,
   ALLOW_UNKNOWN_PROTOCOLS: false,
-  FORBID_ATTR: ["style"],
   FORBID_TAGS: ["script", "style", "template"]
 };
 DOMPurify.addHook("uponSanitizeAttribute", (_node, data) => {
+  // KaTeX uses inline styles to position fractions, limits, and superscripts.
+  // KaTeX does not permit source-authored HTML by default, so this output is safe
+  // to preserve; styles written in Markdown remain blocked.
+  if (data.attrName === "style" && !_node.closest?.(".katex")) data.keepAttr = false;
   if (data.attrName === "src" && /^data:/i.test(data.attrValue) && !/^data:image\/(?:bmp|gif|jpe?g|png|webp);base64,/i.test(data.attrValue)) data.keepAttr = false;
 });
 marked.use({
@@ -42,6 +50,7 @@ marked.use({
     code({ text, lang }) {
       const language = (lang || "").trim().split(/\s+/, 1)[0].toLowerCase();
       if (language === "mermaid") return `<div class="mermaid-box"><div class="mermaid">${escapeHtml(text)}</div></div>\n`;
+      if (language === "math") return `<div class="math-block">${katex.renderToString(text, { displayMode: true, throwOnError: false, strict: "ignore" })}</div>\n`;
       const safeLanguage = /^[a-z0-9_+-]+$/i.test(language) ? language : "";
       let contents = escapeHtml(text);
       let highlighted = false;
@@ -53,7 +62,29 @@ marked.use({
       return `<pre><code${classes ? ` class="${classes}"` : ""}>${contents}</code></pre>\n`;
     },
     html({ text }) { return text.replace(/<table\b/gi, '<table data-feishu-table="true"'); }
-  }
+  },
+  extensions: [
+    {
+      name: "blockMath",
+      level: "block",
+      start(source) { return source.indexOf("$$"); },
+      tokenizer(source) {
+        const match = /^\$\$[ \t]*\n([\s\S]+?)\n\$\$(?:\n|$)/.exec(source);
+        return match ? { type: "blockMath", raw: match[0], text: match[1] } : undefined;
+      },
+      renderer(token) { return `<div class="math-block">${katex.renderToString(token.text, { displayMode: true, throwOnError: false, strict: "ignore" })}</div>\n`; }
+    },
+    {
+      name: "inlineMath",
+      level: "inline",
+      start(source) { return source.indexOf("$"); },
+      tokenizer(source) {
+        const match = /^\$([^$\n]+?)\$/.exec(source);
+        return match ? { type: "inlineMath", raw: match[0], text: match[1] } : undefined;
+      },
+      renderer(token) { return katex.renderToString(token.text, { displayMode: false, throwOnError: false, strict: "ignore" }); }
+    }
+  ]
 });
 ui.appVersion.textContent = `v${APP_VERSION}`;
 
@@ -83,7 +114,7 @@ function setSaveState(text, kind = "") { ui.saveState.textContent = text; ui.sav
 function setDirty(value) { state.dirty = value; ui.dirtyMark.textContent = value ? "● 未保存" : ""; }
 function automaticTheme(now = new Date()) { const hour = now.getHours(); return hour >= 7 && hour < 18 ? "light" : "dark"; }
 function configureMermaidTheme(theme) {
-  mermaid.initialize({ startOnLoad: false, securityLevel: "strict", theme: theme === "dark" ? "dark" : "neutral" });
+  mermaid.initialize({ startOnLoad: false, securityLevel: "strict", theme: theme === "dark" ? "dark" : "neutral", gantt: MERMAID_GANTT_CONFIG });
 }
 function applyTheme(theme) {
   const changed = document.documentElement.dataset.theme !== theme;
@@ -265,13 +296,229 @@ function openSelectionFormatMenu(clientX, clientY) {
   positionFloatingMenu(menu, clientX, clientY);
   buttons[0]?.focus({ preventScroll: true });
 }
+function selectAllEditor() {
+  if (!editorView) return;
+  const end = editorView.state.doc.length;
+  editorView.dispatch({ selection: { anchor: 0, head: end } });
+  focusEditor();
+}
+function openEditorContextMenu(clientX, clientY) {
+  closeSelectionFormatMenu();
+  const menu = document.createElement("div");
+  menu.className = "mdlite-format-menu mdlite-editor-menu";
+  menu.setAttribute("role", "menu");
+  menu.setAttribute("aria-label", "编辑器操作");
+  const title = document.createElement("div");
+  title.className = "mdlite-format-title";
+  title.textContent = "编辑";
+  const commands = [
+    { label: "撤销", shortcut: "⌘ Z", action: undoEditor },
+    { label: "重做", shortcut: "⇧⌘ Z", action: redoEditor },
+    { divider: true },
+    { label: "粘贴", shortcut: "⌘ V", action: () => void pasteClipboardContent() },
+    { label: "插入图片…", shortcut: "", action: () => void selectImages() },
+    { divider: true },
+    { label: "查找与替换", shortcut: "⌘ F", action: openFindReplace },
+    { label: "全选", shortcut: "⌘ A", action: selectAllEditor },
+  ];
+  const buttons = [];
+  for (const command of commands) {
+    if (command.divider) {
+      const divider = document.createElement("div");
+      divider.className = "mdlite-format-footer";
+      menu.append(divider);
+      continue;
+    }
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "mdlite-format-command";
+    button.setAttribute("role", "menuitem");
+    button.innerHTML = "<span></span><kbd></kbd>";
+    button.querySelector("span").textContent = command.label;
+    button.querySelector("kbd").textContent = command.shortcut;
+    button.addEventListener("mousedown", event => event.preventDefault());
+    button.addEventListener("click", () => { closeSelectionFormatMenu(); command.action(); });
+    menu.append(button);
+    buttons.push(button);
+  }
+  menu.prepend(title);
+  menu.addEventListener("keydown", event => {
+    const index = buttons.indexOf(document.activeElement);
+    let next = null;
+    if (event.key === "Escape") { event.preventDefault(); closeSelectionFormatMenu(); focusEditor(); return; }
+    if (event.key === "ArrowDown") next = buttons[(index + 1) % buttons.length];
+    else if (event.key === "ArrowUp") next = buttons[(index - 1 + buttons.length) % buttons.length];
+    else if (event.key === "Home") next = buttons[0];
+    else if (event.key === "End") next = buttons.at(-1);
+    if (next) { event.preventDefault(); next.focus(); }
+  });
+  document.body.append(menu);
+  selectionFormatMenu = menu;
+  positionFloatingMenu(menu, clientX, clientY);
+  buttons[0]?.focus({ preventScroll: true });
+}
 function handleEditorContextMenu(event) {
   if (!editorView || !state.current) return;
   const { start, end } = editorSelection();
   const position = editorView.posAtCoords({ x: event.clientX, y: event.clientY });
-  if (start === end || position === null || position < start || position > end) { closeSelectionFormatMenu(); return; }
   event.preventDefault();
-  openSelectionFormatMenu(event.clientX, event.clientY);
+  if (start !== end && position !== null && position >= start && position <= end) openSelectionFormatMenu(event.clientX, event.clientY);
+  else openEditorContextMenu(event.clientX, event.clientY);
+}
+function unescapedPipePositions(line) {
+  const positions = [];
+  let escaped = false;
+  for (let index = 0; index < line.length; index += 1) {
+    if (line[index] === "\\" && !escaped) { escaped = true; continue; }
+    if (line[index] === "|" && !escaped) positions.push(index);
+    escaped = false;
+  }
+  return positions;
+}
+function isMarkdownTableRow(line) { return unescapedPipePositions(line).length > 0; }
+function splitMarkdownTableRow(line) {
+  const trimmed = line.trim();
+  const start = trimmed.startsWith("|") ? 1 : 0;
+  const end = trimmed.endsWith("|") ? -1 : trimmed.length;
+  const cells = [];
+  let cell = "", escaped = false;
+  for (let index = start; index < (end === -1 ? trimmed.length - 1 : end); index += 1) {
+    const char = trimmed[index];
+    if (char === "|" && !escaped) { cells.push(cell.trim()); cell = ""; continue; }
+    cell += char;
+    escaped = char === "\\" && !escaped;
+    if (char !== "\\") escaped = false;
+  }
+  cells.push(cell.trim());
+  return cells;
+}
+function isMarkdownTableDelimiter(line) {
+  const cells = splitMarkdownTableRow(line);
+  return cells.length > 0 && cells.every(cell => /^:?-{3,}:?$/.test(cell));
+}
+function markdownTableAtCursor(position = editorSelection().start) {
+  if (!editorView) return null;
+  const doc = editorView.state.doc, cursorLine = doc.lineAt(position), cursorNumber = cursorLine.number;
+  for (let number = 1; number < doc.lines; number += 1) {
+    const header = doc.line(number), delimiter = doc.line(number + 1);
+    if (!isMarkdownTableRow(header.text) || !isMarkdownTableDelimiter(delimiter.text)) continue;
+    let last = number + 1;
+    while (last < doc.lines && isMarkdownTableRow(doc.line(last + 1).text)) last += 1;
+    if (cursorNumber < number || cursorNumber > last) continue;
+    const lines = [];
+    for (let row = number; row <= last; row += 1) lines.push(doc.line(row));
+    const rows = lines.map(line => splitMarkdownTableRow(line.text));
+    const columns = Math.max(...rows.map(row => row.length));
+    rows.forEach(row => { while (row.length < columns) row.push(""); });
+    const localOffset = Math.max(0, position - cursorLine.from);
+    const pipesBeforeCursor = unescapedPipePositions(cursorLine.text).filter(pipe => pipe < localOffset).length;
+    const leadingPipe = /^\s*\|/.test(cursorLine.text);
+    return {
+      from: header.from,
+      to: doc.line(last).to,
+      rows,
+      columns,
+      cursorRow: cursorNumber - number,
+      cursorColumn: Math.max(0, Math.min(columns - 1, pipesBeforeCursor - (leadingPipe ? 1 : 0))),
+    };
+  }
+  return null;
+}
+function tableTextMetrics() {
+  const canvas = document.createElement("canvas"), context = canvas.getContext("2d"), style = getComputedStyle(editorView?.contentDOM || ui.editor);
+  context.font = style.font;
+  const letterSpacing = Number.parseFloat(style.letterSpacing) || 0;
+  return { measure: value => context.measureText(value).width + Math.max(0, [...value].length - 1) * letterSpacing };
+}
+function padTableCell(value, width, metrics) {
+  let padded = value;
+  while (metrics.measure(padded) + .1 < width) padded += " ";
+  return padded;
+}
+function delimiterForAlignment(value, width, metrics) {
+  const source = value.trim(), left = source.startsWith(":"), right = source.endsWith(":");
+  let delimiter = left && right ? ":---:" : left ? ":---" : right ? "---:" : "---";
+  while (metrics.measure(delimiter) + .1 < width) delimiter = right ? `${delimiter.slice(0, -1)}-:` : `${delimiter}-`;
+  return delimiter;
+}
+function formatMarkdownTable(rows, focusRow = 0, focusColumn = 0) {
+  const columns = Math.max(...rows.map(row => row.length));
+  rows.forEach(row => { while (row.length < columns) row.push(""); });
+  const metrics = tableTextMetrics();
+  const widths = Array.from({ length: columns }, (_, column) => Math.max(metrics.measure("---"), ...rows.filter((_, row) => row !== 1).map(row => metrics.measure(row[column]))));
+  let focusOffset = 0, offset = 0;
+  const text = rows.map((row, rowIndex) => {
+    const cells = row.map((cell, column) => rowIndex === 1 ? delimiterForAlignment(cell, widths[column], metrics) : padTableCell(cell, widths[column], metrics));
+    const line = `| ${cells.join(" | ")} |`;
+    if (rowIndex === focusRow) {
+      const column = Math.max(0, Math.min(columns - 1, focusColumn));
+      focusOffset = offset + 2 + cells.slice(0, column).reduce((sum, cell) => sum + cell.length + 3, 0);
+    }
+    offset += line.length + 1;
+    return line;
+  }).join("\n");
+  return { text, focusOffset };
+}
+function updateTableTools() {
+  const table = markdownTableAtCursor();
+  ui.tableTools.hidden = !table;
+  if (!table) return;
+  ui.tableTools.querySelector('[data-table-action="row-delete"]').disabled = table.cursorRow < 2;
+  ui.tableTools.querySelector('[data-table-action="column-delete"]').disabled = table.columns <= 1;
+}
+function applyTableAction(action) {
+  const table = markdownTableAtCursor();
+  if (!table) return;
+  const rows = table.rows.map(row => [...row]);
+  let focusRow = table.cursorRow, focusColumn = table.cursorColumn;
+  if (action === "row-after") {
+    const insertAt = table.cursorRow < 2 ? 2 : table.cursorRow + 1;
+    rows.splice(insertAt, 0, Array(table.columns).fill(""));
+    focusRow = insertAt;
+  } else if (action === "row-delete") {
+    if (table.cursorRow < 2) return;
+    rows.splice(table.cursorRow, 1);
+    focusRow = Math.min(table.cursorRow, rows.length - 1);
+  } else if (action === "column-after") {
+    rows.forEach(row => row.splice(table.cursorColumn + 1, 0, ""));
+    focusColumn = table.cursorColumn + 1;
+  } else if (action === "column-delete") {
+    if (table.columns <= 1) return;
+    rows.forEach(row => row.splice(table.cursorColumn, 1));
+    focusColumn = Math.min(table.cursorColumn, table.columns - 2);
+  } else if (action !== "format") return;
+  if (focusRow === 1) focusRow = 0;
+  const formatted = formatMarkdownTable(rows, focusRow, focusColumn);
+  replaceEditorRange(table.from, table.to, formatted.text, table.from + formatted.focusOffset);
+  setSaveState(action === "format" ? "表格已自动对齐" : "表格已更新", "ok");
+  updateTableTools();
+}
+function tableCellPosition(table, row, column) {
+  if (!editorView) return null;
+  const doc = editorView.state.doc, headerLine = doc.lineAt(table.from).number, line = doc.line(headerLine + row);
+  const pipes = unescapedPipePositions(line.text), leadingPipe = /^\s*\|/.test(line.text);
+  const from = leadingPipe ? (pipes[column] ?? line.text.length) + 1 : column ? (pipes[column - 1] ?? line.text.length) + 1 : 0;
+  const to = leadingPipe ? (pipes[column + 1] ?? line.text.length) : (pipes[column] ?? line.text.length);
+  if (from > to) return null;
+  return line.from + from + (line.text.slice(from, to).match(/^\s*/)?.[0].length || 0);
+}
+function tableTabNavigation(view, direction) {
+  const table = markdownTableAtCursor(view.state.selection.main.from);
+  if (!table) return false;
+  const cells = [];
+  for (let row = 0; row < table.rows.length; row += 1) if (row !== 1) for (let column = 0; column < table.columns; column += 1) cells.push({ row, column });
+  const currentIndex = cells.findIndex(cell => cell.row === table.cursorRow && cell.column === table.cursorColumn);
+  const nextIndex = currentIndex === -1 ? (direction > 0 ? table.columns : table.columns - 1) : currentIndex + direction;
+  if (nextIndex >= 0 && nextIndex < cells.length) {
+    const target = cells[nextIndex], position = tableCellPosition(table, target.row, target.column);
+    if (position !== null) view.dispatch({ selection: { anchor: position }, scrollIntoView: true });
+    return true;
+  }
+  if (direction < 0) return true;
+  const row = `\n| ${Array(table.columns).fill("").join(" | ")} |`;
+  view.dispatch({ changes: { from: table.to, to: table.to, insert: row }, selection: { anchor: table.to + 3 }, scrollIntoView: true });
+  setSaveState("已在表格末尾新增一行", "ok");
+  return true;
 }
 const markdownSlashOptions = [
   snippetCompletion("# ${1:标题}", { label: "/标题", detail: "一级标题", type: "keyword", boost: 100 }),
@@ -398,22 +645,26 @@ function createMarkdownEditor(content = "", readOnly = true) {
       doc: content,
       extensions: [
         basicSetup,
+        keymap.of([{ key: "Tab", run: view => tableTabNavigation(view, 1) }, { key: "Shift-Tab", run: view => tableTabNavigation(view, -1) }]),
         markdown(),
         autocompletion({ override: [markdownSlashCompletion], defaultKeymap: true }),
         search({ top: true, createPanel: view => new MarkdownSearchPanel(view) }),
         EditorState.readOnly.of(readOnly),
         EditorView.lineWrapping,
         EditorView.updateListener.of(update => {
-          if (update.selectionSet) closeSelectionFormatMenu();
+          if (update.selectionSet) { closeSelectionFormatMenu(); updateTableTools(); }
           if (!update.docChanged || !state.current) return;
           setDirty(true);
           void renderPreview();
+          updateTableTools();
+          scheduleAutoSave();
         }),
       ],
     }),
   });
   editorView.contentDOM.addEventListener("paste", handleEditorPaste);
   editorView.contentDOM.addEventListener("contextmenu", handleEditorContextMenu);
+  updateTableTools();
 }
 function setEditorDocument(content, readOnly = false) { createMarkdownEditor(content, readOnly); }
 function undoEditor() { if (!editorView || !undo(editorView)) setSaveState("没有可撤销的修改"); else setSaveState("已撤销", "ok"); }
@@ -593,6 +844,7 @@ async function selectDocument(path, rootPath = null, { skipDiscardConfirm = fals
     return;
   }
   if (!skipDiscardConfirm && !confirmDiscardChanges()) return;
+  cancelAutoSave();
   state.current = doc;
   state.activeRoot = root?.path || null;
   state.selectedFolder = parentPath(doc.path); openParentFolders(doc.path, root?.path);
@@ -604,6 +856,7 @@ async function selectDocument(path, rootPath = null, { skipDiscardConfirm = fals
 
 async function createUntitledDocument() {
   if (!confirmDiscardChanges()) return;
+  cancelAutoSave();
   state.current = { path: null, relativePath: "未命名.md", content: "", isUntitled: true };
   setEditorDocument("");
   ui.currentPath.textContent = "未命名.md";
@@ -711,7 +964,83 @@ function renderTree() {
 
 function escapeHtml(value) { return value.replace(/[&<>'"]/g, char => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" })[char]); }
 function sanitizeHtml(html) { return DOMPurify.sanitize(html, SANITIZE_CONFIG); }
-function renderMarkdown(source) { return marked.parse(source); }
+function unquoteFrontMatterValue(value) {
+  const trimmed = value.trim();
+  if ((trimmed.startsWith("'") && trimmed.endsWith("'")) || (trimmed.startsWith('"') && trimmed.endsWith('"'))) return trimmed.slice(1, -1);
+  return trimmed;
+}
+function extractFrontMatter(source) {
+  const match = /^---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*(?:\r?\n|$)/.exec(source);
+  if (!match) return { source, fields: [] };
+  const fields = [], byName = new Map();
+  let current = null;
+  match[1].replaceAll("\r\n", "\n").replaceAll("\r", "\n").split("\n").forEach(line => {
+    const item = /^\s*-\s+(.+)$/.exec(line);
+    if (item && current?.values) { current.values.push(unquoteFrontMatterValue(item[1])); return; }
+    const property = /^([^:#][^:]*):(?:\s*(.*))?$/.exec(line);
+    if (!property) return;
+    current = { name: property[1].trim(), values: property[2] ? [unquoteFrontMatterValue(property[2])] : [] };
+    fields.push(current); byName.set(current.name, current);
+  });
+  return { source: source.slice(match[0].length), fields: fields.filter(field => field.values.length), byName };
+}
+function frontMatterValue(value) {
+  if (!/^https?:\/\//i.test(value)) return escapeHtml(value);
+  return `<a href="${escapeHtml(value)}">${escapeHtml(value)}</a>`;
+}
+function renderFrontMatter(fields, byName) {
+  if (!fields.length) return "";
+  const title = byName?.get("title")?.values[0];
+  const rows = fields.filter(field => field.name !== "title").map(field => {
+    const values = field.values.map(value => `<span class="front-matter-value">${frontMatterValue(value)}</span>`).join("");
+    return `<div class="front-matter-row"><span class="front-matter-key">${escapeHtml(field.name)}</span><span class="front-matter-values">${values}</span></div>`;
+  }).join("");
+  return `<section class="front-matter-card">${title ? `<h1>${escapeHtml(title)}</h1>` : ""}<strong>文档属性</strong>${rows ? `<div class="front-matter-rows">${rows}</div>` : ""}</section>`;
+}
+function footnoteId(label) { return `footnote-${encodeURIComponent(label).replace(/%/g, "-")}`; }
+function preprocessMarkdown(source) {
+  const definitions = new Map(), output = [];
+  const frontMatter = extractFrontMatter(source);
+  const lines = frontMatter.source.replaceAll("\r\n", "\n").replaceAll("\r", "\n").split("\n");
+  let inFence = false;
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index], trimmed = line.trim();
+    if (/^(?:`{3,}|~{3,})/.test(trimmed)) { inFence = !inFence; output.push(line); continue; }
+    const definition = !inFence && /^\[\^([^\]\n]+)\]:\s*(.*)$/.exec(line);
+    if (!definition) { output.push(line); continue; }
+    const contents = [definition[2]];
+    while (index + 1 < lines.length && /^(?: {2,}|\t)/.test(lines[index + 1])) contents.push(lines[++index].replace(/^(?: {2,}|\t)/, ""));
+    definitions.set(definition[1], contents.join("\n").trim());
+  }
+  let referenceNumber = 0;
+  const numbers = new Map();
+  inFence = false;
+  const markdown = output.map(line => {
+    const trimmed = line.trim();
+    if (/^(?:`{3,}|~{3,})/.test(trimmed)) { inFence = !inFence; return line; }
+    if (inFence) return line;
+    if (trimmed === "[TOC]") return '<nav class="markdown-toc"><strong>目录</strong><ol></ol></nav>';
+    return line.replace(/\[\^([^\]\n]+)\]/g, (match, label) => {
+      if (!definitions.has(label)) return match;
+      if (!numbers.has(label)) numbers.set(label, ++referenceNumber);
+      const number = numbers.get(label), id = footnoteId(label);
+      return `<sup class="footnote-ref"><a href="#${id}" id="${id}-ref">${number}</a></sup>`;
+    });
+  }).join("\n");
+  return { markdown, definitions, numbers, frontMatter };
+}
+function renderFootnotes(definitions, numbers) {
+  if (!numbers.size) return "";
+  const items = [...numbers.entries()].sort(([, left], [, right]) => left - right).map(([label, number]) => {
+    const id = footnoteId(label), content = marked.parseInline(definitions.get(label) || "").replaceAll("\n", "<br>");
+    return `<li id="${id}">${content} <a class="footnote-backref" href="#${id}-ref" title="返回正文">↩</a></li>`;
+  }).join("");
+  return `<section class="footnotes"><hr><ol>${items}</ol></section>`;
+}
+function renderMarkdown(source) {
+  const { markdown, definitions, numbers, frontMatter } = preprocessMarkdown(source);
+  return `${renderFrontMatter(frontMatter.fields, frontMatter.byName)}${marked.parse(markdown)}${renderFootnotes(definitions, numbers)}`;
+}
 function prepareTaskLists(root) {
   root.querySelectorAll("input").forEach(input => {
     const isReadOnlyTask = input.matches('li > input[type="checkbox"][disabled]');
@@ -727,9 +1056,47 @@ function processRawCells(root) {
 }
 function prepareMermaidBlocks(root) {
   root.querySelectorAll(".mermaid-box > .mermaid").forEach(diagram => {
-    const button = document.createElement("button");
-    button.type = "button"; button.className = "fullscreen-chart"; button.dataset.mermaidFullscreen = ""; button.textContent = "全屏查看";
-    diagram.before(button);
+    // Mermaid derives Gantt coordinates from this container before creating
+    // the SVG, so do not let a narrow split view compress its time axis.
+    if (/^\s*gantt\b/i.test(diagram.textContent)) diagram.parentElement?.classList.add("gantt-box");
+    const actions = document.createElement("div");
+    actions.className = "mermaid-actions";
+    const sourceButton = document.createElement("button");
+    sourceButton.type = "button"; sourceButton.className = "mermaid-source-toggle"; sourceButton.dataset.mermaidSource = ""; sourceButton.setAttribute("aria-pressed", "false"); sourceButton.textContent = "查看源码";
+    const fullscreenButton = document.createElement("button");
+    fullscreenButton.type = "button"; fullscreenButton.className = "fullscreen-chart"; fullscreenButton.dataset.mermaidFullscreen = ""; fullscreenButton.textContent = "全屏查看";
+    const source = document.createElement("pre");
+    source.className = "mermaid-source";
+    const code = document.createElement("code");
+    code.textContent = diagram.textContent;
+    source.append(code);
+    actions.append(sourceButton, fullscreenButton);
+    diagram.before(actions);
+    diagram.after(source);
+  });
+}
+function fitMermaidDiagrams(root) {
+  root.querySelectorAll(".mermaid-box > .mermaid > svg").forEach(svg => {
+    svg.style.setProperty("max-width", "100%", "important");
+    svg.style.setProperty("width", "auto", "important");
+    svg.style.setProperty("height", "auto", "important");
+  });
+}
+function prepareCodeBlocks(root) {
+  root.querySelectorAll("pre:not(.mermaid-source)").forEach(pre => {
+    const code = pre.querySelector(":scope > code");
+    if (!code || code.textContent.split(/\r?\n/).length <= 12) return;
+    const block = document.createElement("section");
+    block.className = "code-block has-actions";
+    const actions = document.createElement("div");
+    actions.className = "code-block-actions";
+    const collapseButton = document.createElement("button");
+    collapseButton.type = "button"; collapseButton.dataset.codeCollapse = ""; collapseButton.setAttribute("aria-expanded", "true"); collapseButton.title = "折叠代码"; collapseButton.setAttribute("aria-label", "折叠代码"); collapseButton.textContent = "⌃";
+    const copyButton = document.createElement("button");
+    copyButton.type = "button"; copyButton.dataset.codeCopy = ""; copyButton.title = "复制代码"; copyButton.setAttribute("aria-label", "复制代码"); copyButton.textContent = "⧉";
+    actions.append(collapseButton, copyButton);
+    pre.before(block);
+    block.append(actions, pre);
   });
 }
 function wrapTables(root) { root.querySelectorAll("table").forEach(table => { const wrap = document.createElement("div"); wrap.className = "table-wrap"; table.before(wrap); wrap.append(table); }); }
@@ -742,6 +1109,45 @@ function addHeadingIds(root) {
     const base = headingId(heading.textContent) || "section", index = used.get(base) || 0;
     used.set(base, index + 1); heading.id = index ? `${base}-${index}` : base;
   });
+}
+function prepareTocs(root) {
+  const headings = [...root.querySelectorAll("h1,h2,h3,h4,h5,h6")];
+  root.querySelectorAll(".markdown-toc").forEach(toc => {
+    const list = toc.querySelector("ol");
+    if (!list) return;
+    list.replaceChildren();
+    headings.forEach(heading => {
+      const item = document.createElement("li"), link = document.createElement("a");
+      link.href = `#${heading.id}`; link.textContent = heading.textContent.trim() || "未命名标题";
+      item.style.setProperty("--toc-depth", String(Math.max(0, Number(heading.tagName.slice(1)) - 1)));
+      item.append(link); list.append(item);
+    });
+  });
+}
+const CALLOUT_TITLES = { note: "备注", abstract: "摘要", summary: "摘要", tldr: "摘要", info: "信息", todo: "待办", tip: "提示", hint: "提示", important: "重要", success: "成功", check: "成功", done: "完成", question: "问题", help: "帮助", faq: "常见问题", warning: "警告", caution: "注意", attention: "注意", failure: "失败", fail: "失败", missing: "缺失", danger: "危险", error: "错误", bug: "缺陷", example: "示例", quote: "引用", cite: "引用" };
+function prepareCallouts(root) {
+  root.querySelectorAll("blockquote").forEach(blockquote => {
+    const first = blockquote.querySelector(":scope > p:first-child");
+    if (!first) return;
+    const marker = /^\[!([a-z][\w-]*)\]([+-])?(?:\s+([^<]+))?(?:<br\s*\/?>|$)/i.exec(first.innerHTML);
+    if (!marker) return;
+    const type = marker[1].toLowerCase(), title = marker[3]?.trim() || CALLOUT_TITLES[type] || type;
+    first.innerHTML = first.innerHTML.slice(marker[0].length);
+    if (!first.textContent.trim() && !first.children.length) first.remove();
+    const header = document.createElement("button");
+    header.type = "button"; header.className = "callout-title"; header.textContent = title;
+    header.setAttribute("aria-expanded", String(marker[2] !== "-"));
+    header.addEventListener("click", () => {
+      const collapsed = blockquote.classList.toggle("callout-collapsed");
+      header.setAttribute("aria-expanded", String(!collapsed));
+    });
+    blockquote.classList.add("callout", `callout-${type}`);
+    if (marker[2] === "-") blockquote.classList.add("callout-collapsed");
+    blockquote.prepend(header);
+  });
+}
+function prepareNamedAnchors(root) {
+  root.querySelectorAll("a[name]").forEach(anchor => { if (!anchor.id) anchor.id = anchor.getAttribute("name"); });
 }
 function renderDocumentOutline() {
   const headings = [...ui.preview.querySelectorAll("h1,h2,h3,h4,h5,h6")];
@@ -799,9 +1205,9 @@ async function renderPreview() {
   if (!state.current) return;
   ui.previewState.textContent = "渲染中…";
   ui.preview.innerHTML = sanitizeHtml(renderMarkdown(editorValue()));
-  clearPreviewFindHighlights(); processRawCells(ui.preview); ui.preview.innerHTML = sanitizeHtml(ui.preview.innerHTML); prepareTaskLists(ui.preview); prepareMermaidBlocks(ui.preview); addHeadingIds(ui.preview); renderDocumentOutline(); wrapTables(ui.preview); state.previewMatch = null; await hydrateLocalImages();
+  clearPreviewFindHighlights(); processRawCells(ui.preview); ui.preview.innerHTML = sanitizeHtml(ui.preview.innerHTML); prepareTaskLists(ui.preview); prepareMermaidBlocks(ui.preview); prepareCodeBlocks(ui.preview); addHeadingIds(ui.preview); prepareTocs(ui.preview); prepareCallouts(ui.preview); prepareNamedAnchors(ui.preview); renderDocumentOutline(); wrapTables(ui.preview); state.previewMatch = null; await hydrateLocalImages();
   const diagrams = [...ui.preview.querySelectorAll(".mermaid")];
-  if (diagrams.length) { diagrams.forEach(node => node.id = `mermaid-${++state.mermaidSequence}`); try { await mermaid.run({ nodes: diagrams }); } catch (error) { void reportAppError("mermaid-render", error); ui.previewState.textContent = "部分 Mermaid 图显示源码"; return; } }
+  if (diagrams.length) { diagrams.forEach(node => node.id = `mermaid-${++state.mermaidSequence}`); try { await mermaid.run({ nodes: diagrams }); fitMermaidDiagrams(ui.preview); } catch (error) { void reportAppError("mermaid-render", error); ui.previewState.textContent = "部分 Mermaid 图显示源码"; return; } }
   ui.previewState.textContent = "";
 }
 
@@ -883,6 +1289,7 @@ async function resolveReloadConflict(action) {
 }
 
 async function saveCurrent() {
+  cancelAutoSave();
   if (!state.current) return false;
   if (state.current.path && !state.dirty) return true;
   if (state.current.path && !await checkDiskVersion()) return false;
@@ -902,6 +1309,61 @@ async function saveCurrent() {
     }
     setDirty(false); setSaveState("已保存", "ok"); return true;
   } catch (error) { void reportAppError("document-save", error); setSaveState(`保存失败：${error}`, "error"); return false; }
+}
+function exportHtmlDocument() {
+  const title = escapeHtml((state.current?.relativePath || "Markdown 文档").replace(/\.(md|markdown)$/i, ""));
+  const contents = sanitizeHtml(renderMarkdown(editorValue()));
+  return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${title}</title><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.22/dist/katex.min.css"><style>body{max-width:900px;margin:40px auto;padding:0 24px;color:#202733;font:16px/1.7 -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif}pre{overflow:auto;padding:14px;border-radius:8px;background:#202733;color:#e6edf3}code{padding:.1em .3em;border-radius:4px;background:#f1f3f5}pre code{padding:0;background:transparent}img{max-width:100%;height:auto}table{width:100%;border-collapse:collapse}th,td{padding:8px 10px;border:1px solid #d9e2f0;text-align:left;vertical-align:top}th{background:#eef4ff}.math-block{overflow:auto;margin:1em 0;text-align:center}</style></head><body>${contents}</body></html>`;
+}
+async function exportHtml() {
+  if (!state.current) { setSaveState("请先打开一个 Markdown 文档", "error"); return; }
+  const defaultPath = (state.current.relativePath || "未命名.md").replace(/\.(md|markdown)$/i, ".html");
+  const destination = await save({ defaultPath, filters: [{ name: "HTML", extensions: ["html"] }], title: "导出 HTML" });
+  if (!destination) return;
+  try {
+    await invoke("save_html_export", { path: destination, content: exportHtmlDocument() });
+    setSaveState("已导出 HTML", "ok");
+  } catch (error) { void reportAppError("html-export", error); setSaveState(`导出 HTML 失败：${error}`, "error"); }
+}
+async function exportPdf() {
+  if (!state.current) { setSaveState("请先打开一个 Markdown 文档", "error"); return; }
+  const defaultPath = (state.current.relativePath || "未命名.md").replace(/\.(md|markdown)$/i, ".pdf");
+  const destination = await save({ defaultPath, filters: [{ name: "PDF", extensions: ["pdf"] }], title: "导出 PDF" });
+  if (!destination) return;
+  if (state.dirty) await renderPreview();
+  setMode("preview");
+  setSaveState("正在导出 PDF…");
+  try {
+    await invoke("export_pdf", { path: destination });
+  } catch (error) {
+    void reportAppError("pdf-export", error); setSaveState(`导出 PDF 失败：${error}`, "error");
+  }
+}
+function cancelAutoSave() {
+  window.clearTimeout(state.autoSaveTimer);
+  state.autoSaveTimer = null;
+}
+function scheduleAutoSave() {
+  cancelAutoSave();
+  if (!state.current?.path || state.reloadConflict) return;
+  state.autoSaveTimer = window.setTimeout(() => { void autoSaveCurrent(); }, 900);
+}
+async function autoSaveCurrent() {
+  state.autoSaveTimer = null;
+  const current = state.current;
+  if (!current?.path || !state.dirty || state.reloadConflict) return;
+  if (!await checkDiskVersion()) return;
+  const content = editorValue();
+  try {
+    await invoke("save_markdown_file", { path: current.path, content });
+    if (state.current?.path !== current.path || editorValue() !== content) return;
+    current.content = content;
+    setDirty(false);
+    setSaveState("已自动保存", "ok");
+  } catch (error) {
+    void reportAppError("document-auto-save", error);
+    setSaveState(`自动保存失败：${error}`, "error");
+  }
 }
 async function closeCurrentDocument() {
   if (!state.current) return;
@@ -978,6 +1440,51 @@ function openFindReplace() {
   updateFindStatus();
 }
 function closeFindReplace() { clearPreviewFindHighlights(); ui.findReplaceModal.hidden = true; }
+function globalSearchContent(entry) { return state.current?.path === entry.path ? editorValue() : entry.content || ""; }
+function globalSearchExcerpt(content, position, length) {
+  const lineStart = content.lastIndexOf("\n", position - 1) + 1, lineEnd = content.indexOf("\n", position + length);
+  const line = content.slice(lineStart, lineEnd === -1 ? content.length : lineEnd).trim();
+  return line.length > 130 ? `${line.slice(0, 127)}…` : line || "（空行）";
+}
+function renderGlobalSearchResults() {
+  const query = ui.globalSearchText.value.trim().toLocaleLowerCase();
+  ui.globalSearchResults.replaceChildren();
+  if (!query) { ui.globalSearchStatus.textContent = "输入关键词开始搜索。"; return; }
+  const results = [];
+  for (const entry of state.docs.values()) {
+    const content = globalSearchContent(entry), name = fileName(entry.path).toLocaleLowerCase();
+    if (name.includes(query)) results.push({ entry, position: 0, kind: "文件名", excerpt: entry.relativePath || fileName(entry.path) });
+    let from = 0, count = 0, index;
+    while (count < 12 && (index = content.toLocaleLowerCase().indexOf(query, from)) !== -1) {
+      results.push({ entry, position: index, kind: "正文", excerpt: globalSearchExcerpt(content, index, query.length) });
+      from = index + query.length; count += 1;
+      if (results.length >= 100) break;
+    }
+    if (results.length >= 100) break;
+  }
+  results.forEach(result => {
+    const button = document.createElement("button"), title = document.createElement("span"), excerpt = document.createElement("span");
+    button.type = "button"; button.className = "global-search-result"; button.setAttribute("role", "option");
+    title.className = "global-search-result-title"; title.textContent = `${fileName(result.entry.path)} · ${result.kind}`;
+    excerpt.className = "global-search-result-excerpt"; excerpt.textContent = result.excerpt;
+    button.append(title, excerpt);
+    button.addEventListener("click", async () => {
+      await selectDocument(result.entry.path, workspaceForPath(result.entry.path)?.path);
+      const position = Math.min(result.position, editorValue().length);
+      replaceEditorRange(position, position + query.length, editorValue().slice(position, position + query.length), position, position + query.length);
+      closeGlobalSearch();
+    });
+    ui.globalSearchResults.append(button);
+  });
+  ui.globalSearchStatus.textContent = results.length ? `找到 ${results.length}${results.length === 100 ? "+" : ""} 条结果。` : "没有匹配结果。";
+}
+function openGlobalSearch() {
+  if (!state.docs.size) { setSaveState("请先打开一个 Markdown 文档目录", "error"); return; }
+  ui.globalSearchModal.hidden = false;
+  ui.globalSearchText.focus(); ui.globalSearchText.select();
+  renderGlobalSearchResults();
+}
+function closeGlobalSearch() { ui.globalSearchModal.hidden = true; }
 function openCreate(kind, targetFolder = state.selectedFolder) {
   const parentPath = targetFolder && normalisePath(targetFolder);
   const workspace = parentPath && workspaceForPath(parentPath);
@@ -1134,9 +1641,28 @@ async function pasteClipboardContent(fallbackText = "") {
     setSaveState(`未能读取剪贴板内容：${error}${logPath ? `（日志：${logPath}）` : ""}`, "error");
   }
 }
+function escapeMarkdownTableCell(value) { return value.replaceAll("\\", "\\\\").replaceAll("|", "\\|").trim(); }
+function markdownTableFromTsv(text) {
+  if (!text.includes("\t") || markdownTableAtCursor()) return null;
+  const sourceRows = text.replaceAll("\r\n", "\n").replaceAll("\r", "\n").split("\n");
+  if (sourceRows.at(-1) === "") sourceRows.pop();
+  const cells = sourceRows.map(row => row.split("\t").map(escapeMarkdownTableCell));
+  const columns = Math.max(...cells.map(row => row.length));
+  if (columns < 2) return null;
+  cells.forEach(row => { while (row.length < columns) row.push(""); });
+  const rows = [cells[0], Array(columns).fill("---"), ...cells.slice(1)];
+  const focusRow = rows.length > 2 ? 2 : 0;
+  return formatMarkdownTable(rows, focusRow, 0);
+}
 function insertPlainText(text) {
   if (!text) return;
-  replaceEditorSelection(text);
+  const table = markdownTableFromTsv(text);
+  if (!table) { replaceEditorSelection(text); return; }
+  const { start, end } = editorSelection(), value = editorValue();
+  const before = start > 0 && value[start - 1] !== "\n" ? "\n" : "";
+  const after = end < value.length && value[end] !== "\n" ? "\n" : "";
+  replaceEditorRange(start, end, `${before}${table.text}${after}`, start + before.length + table.focusOffset);
+  setSaveState("已将 Excel 表格转换为 Markdown 表格", "ok");
 }
 async function copySelection() {
   const { start, end } = editorSelection();
@@ -1224,12 +1750,46 @@ getCurrentWindow().onDragDropEvent(event => {
   }
 });
 ui.preview.addEventListener("click", event => {
+  const codeCollapse = event.target.closest("[data-code-collapse]");
+  if (codeCollapse) {
+    const block = codeCollapse.closest(".code-block"), collapsed = block?.classList.toggle("collapsed");
+    codeCollapse.textContent = collapsed ? "⌄" : "⌃";
+    codeCollapse.title = collapsed ? "展开代码" : "折叠代码";
+    codeCollapse.setAttribute("aria-label", codeCollapse.title);
+    codeCollapse.setAttribute("aria-expanded", String(!collapsed));
+    return;
+  }
+  const codeCopy = event.target.closest("[data-code-copy]");
+  if (codeCopy) {
+    const code = codeCopy.closest(".code-block")?.querySelector("pre > code");
+    if (!code?.textContent) return;
+    invoke("copy_markdown_text", { text: code.textContent }).then(() => {
+      codeCopy.textContent = "✓"; codeCopy.title = "已复制"; codeCopy.setAttribute("aria-label", "已复制"); setSaveState("代码已复制", "ok");
+      window.setTimeout(() => { codeCopy.textContent = "⧉"; codeCopy.title = "复制代码"; codeCopy.setAttribute("aria-label", "复制代码"); }, 1400);
+    }).catch(error => { void reportAppError("copy-code-block", error); setSaveState(`复制失败：${error}`, "error"); });
+    return;
+  }
+  const sourceToggle = event.target.closest("[data-mermaid-source]");
+  if (sourceToggle) {
+    const box = sourceToggle.closest(".mermaid-box");
+    const showingSource = box?.classList.toggle("showing-source");
+    sourceToggle.textContent = showingSource ? "返回图表" : "查看源码";
+    sourceToggle.setAttribute("aria-pressed", String(Boolean(showingSource)));
+    return;
+  }
   const chart = event.target.closest("[data-mermaid-fullscreen]");
   if (chart) { openFullscreen(chart.closest(".mermaid-box")); return; }
   const link = event.target.closest("a[href]");
   if (!link || !state.current) return;
   const href = link.getAttribute("href") || "";
-  if (/^(https?:|mailto:|tel:)/i.test(href)) return;
+  if (/^(https?:|mailto:|tel:)/i.test(href)) {
+    event.preventDefault();
+    openUrl(href).catch(error => {
+      void reportAppError("external-link", error);
+      setSaveState(`无法打开链接：${error}`, "error");
+    });
+    return;
+  }
   if (href.startsWith("#")) { event.preventDefault(); scrollToAnchor(href); return; }
   const workspace = state.activeRoot ? state.roots.get(state.activeRoot) : workspaceForPath(state.current.path);
   const currentRelativePath = workspace ? relativeToRoot(state.current.path, workspace.path) : state.current.relativePath || fileName(state.current.path);
@@ -1275,8 +1835,11 @@ ui.findReplaceModal.addEventListener("click", event => {
   else if (action === "previous") { findMatch(-1); ui.findText.focus(); }
 });
 ui.createModal.addEventListener("click", event => { const action = event.target.dataset.createAction; if (event.target === ui.createModal || action === "close") closeCreate(); else if (action === "confirm") createEntry(); });
+ui.globalSearchModal.addEventListener("click", event => { if (event.target === ui.globalSearchModal || event.target.dataset.globalSearchAction === "close") closeGlobalSearch(); });
 ui.reloadModal.addEventListener("click", event => { const action = event.target.dataset.reloadAction; if (action) resolveReloadConflict(action); });
 ui.createName.addEventListener("keydown", event => { if (event.key === "Enter") { event.preventDefault(); createEntry(); } });
+ui.globalSearchText.addEventListener("input", renderGlobalSearchResults);
+ui.globalSearchText.addEventListener("keydown", event => { if (event.key === "Escape") { event.preventDefault(); closeGlobalSearch(); focusEditor(); } });
 ui.findText.addEventListener("input", () => { clearPreviewFindHighlights(); state.previewMatch = null; updateFindStatus(); });
 async function pasteIntoFindInput(input) {
   try {
@@ -1307,6 +1870,8 @@ function handleFindInputKeydown(event, input) {
 ui.findText.addEventListener("keydown", event => { if (isImeComposing(event)) return; handleFindInputKeydown(event, ui.findText); if (event.key === "Enter") { event.preventDefault(); findMatch(event.shiftKey ? -1 : 1); } });
 ui.replaceText.addEventListener("keydown", event => { if (isImeComposing(event)) return; handleFindInputKeydown(event, ui.replaceText); });
 document.querySelectorAll("[data-mode]").forEach(button => button.addEventListener("click", () => setMode(button.dataset.mode)));
+document.querySelectorAll("[data-table-action]").forEach(button => button.addEventListener("mousedown", event => event.preventDefault()));
+document.querySelectorAll("[data-table-action]").forEach(button => button.addEventListener("click", () => applyTableAction(button.dataset.tableAction)));
 document.addEventListener("pointerdown", event => {
   if (selectionFormatMenu && !selectionFormatMenu.contains(event.target)) closeSelectionFormatMenu();
   if (folderContextMenu && !folderContextMenu.contains(event.target)) closeFolderContextMenu();
@@ -1329,8 +1894,11 @@ listen("menu-action", event => {
     case "new-markdown": state.selectedFolder ? openCreate("file") : createUntitledDocument(); break;
     case "new-folder": openCreate("folder"); break;
     case "save": saveCurrent(); break;
+    case "export-html": exportHtml(); break;
+    case "export-pdf": exportPdf(); break;
     case "reload": checkDiskVersion(true); break;
     case "find-replace": openFindReplace(); break;
+    case "global-search": openGlobalSearch(); break;
     case "about": window.alert(`${APP_NAME}\nv${APP_VERSION}`); break;
     case "mode-edit": setMode("edit"); break;
     case "mode-split": setMode("split"); break;
@@ -1338,21 +1906,39 @@ listen("menu-action", event => {
   }
 });
 getCurrentWindow().onFocusChanged(event => { if (event.payload) checkDiskVersion(); }).catch(error => { void reportAppError("focus-listener", error); });
-listen("open-markdown-file", event => { openMarkdownPath(event.payload); });
 listen("open-recent-item", event => {
   if (event.payload?.kind === "folder") openMarkdownFolder(event.payload.path);
   else if (event.payload?.kind === "file") openMarkdownPath(event.payload.path);
+});
+listen("pdf-export-finished", event => {
+  const result = event.payload;
+  if (result.error) { void reportAppError("pdf-export", result.error); setSaveState(`导出 PDF 失败：${result.error}`, "error"); }
+  else setSaveState("已导出 PDF", "ok");
 });
 document.addEventListener("keydown", event => {
   const shortcut = event.metaKey || event.ctrlKey, key = event.key.toLowerCase();
   if (isImeComposing(event)) return;
   if (state.reloadConflict && shortcut) { event.preventDefault(); return; }
-  if (event.key === "Escape") { if (!ui.findReplaceModal.hidden) closeFindReplace(); else closeFullscreen(); }
+  if (event.key === "Escape") { if (!ui.globalSearchModal.hidden) closeGlobalSearch(); else if (!ui.findReplaceModal.hidden) closeFindReplace(); else closeFullscreen(); }
   if (shortcut && key === "v" && editorHasFocus()) queuePasteShortcutFallback();
   if (shortcut && key === "s") { event.preventDefault(); saveCurrent(); }
-  if (shortcut && (key === "f" || key === "h") && isPreviewMode()) { event.preventDefault(); openFindReplace(); }
+  if (shortcut && event.shiftKey && key === "f") { event.preventDefault(); openGlobalSearch(); }
+  if (shortcut && event.shiftKey && key === "e") { event.preventDefault(); exportHtml(); }
+  if (shortcut && key === "p") { event.preventDefault(); exportPdf(); }
+  if (shortcut && !event.shiftKey && (key === "f" || key === "h") && isPreviewMode()) { event.preventDefault(); openFindReplace(); }
 });
 applyTheme(automaticTheme());
 scheduleAutomaticTheme();
-void loadRecentDocuments();
-void restoreWorkspaceSession();
+async function initializeWorkspace() {
+  try {
+    await loadRecentDocuments();
+    await restoreWorkspaceSession();
+    await listen("open-markdown-file", event => { void openMarkdownPath(event.payload); });
+    const openedPaths = await invoke("take_opened_markdown_files");
+    for (const path of openedPaths) await openMarkdownPath(path);
+  } catch (error) {
+    void reportAppError("workspace-initialization", error);
+    setSaveState(`初始化失败：${error}`, "error");
+  }
+}
+void initializeWorkspace();

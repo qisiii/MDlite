@@ -1,0 +1,35 @@
+index.html
+  e8580d22891b7f9a 36-45,76-81
+src-tauri/capabilities/default.json
+  e8580d22891b7f9a 6
+src/style.css
+  e8580d22891b7f9a 47-54,104-135,138-147,155-156,197-232
+src/main.js
+  e8580d22891b7f9a 5,10,13,19,24-25,29-30,32-33,40-43,53,65-87,117,299-352,365-521,648,655,659-660,667,847,859,967-1043,1059-1099,1113-1146,1149-1151,1208,1210,1292,1313-1366,1443-1487,1644-1656,1659-1665,1753-1779,1785-1792,1838,1841-1842,1873-1874,1897-1898,1901,1913-1917,1922,1925-1928,1932-1944
+src-tauri/Cargo.toml
+  e8580d22891b7f9a 18-24
+src-tauri/src/main.rs
+  e8580d22891b7f9a 4-5,9-16,52-56,85-88,90-95,185-221,224-244,525-526,546-548,576-580,587-588,610,619-627
+package.json
+  e8580d22891b7f9a 29,33
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.7",
+  "base_commit_sha": "262590181cf6f75318ed1fe4b52186642d30ae51",
+  "prompts": {
+    "e8580d22891b7f9a": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "conv_20260920_mdlite_editor_enhancements",
+        "model": "gpt-5"
+      },
+      "human_author": "qisiii",
+      "messages": [],
+      "total_additions": 838,
+      "total_deletions": 33,
+      "accepted_lines": 838,
+      "overriden_lines": 0
+    }
+  }
+}

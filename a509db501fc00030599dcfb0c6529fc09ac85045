@@ -1,0 +1,56 @@
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.7",
+  "base_commit_sha": "a509db501fc00030599dcfb0c6529fc09ac85045",
+  "prompts": {
+    "4c73607a76ed8034": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "conv_20260915_codemirror_search",
+        "model": "gpt-5"
+      },
+      "human_author": "qisiii",
+      "messages": [],
+      "total_additions": 430,
+      "total_deletions": 136,
+      "accepted_lines": 6,
+      "overriden_lines": 0
+    },
+    "e8580d22891b7f9a": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "conv_20260920_mdlite_editor_enhancements",
+        "model": "gpt-5"
+      },
+      "human_author": "qisiii",
+      "messages": [],
+      "total_additions": 838,
+      "total_deletions": 33,
+      "accepted_lines": 3,
+      "overriden_lines": 0
+    },
+    "e889181d66e599c7": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "conv_20260921_release_version_fix",
+        "model": "gpt-5"
+      },
+      "human_author": "qisiii",
+      "messages": [
+        {
+          "type": "user",
+          "text": "将误发的0.3恢复为0.2"
+        },
+        {
+          "type": "assistant",
+          "text": "恢复版本字段并重建0.2发布提交"
+        }
+      ],
+      "total_additions": 3,
+      "total_deletions": 7,
+      "accepted_lines": 3,
+      "overriden_lines": 0
+    }
+  }
+}

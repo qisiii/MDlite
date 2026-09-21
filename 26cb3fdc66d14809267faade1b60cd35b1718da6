@@ -1,0 +1,25 @@
+src/main.js
+  75caf1947753620d 1185-1187,1191,1313-1314,1316-1329,1337,1354,1356-1357,1359,1361-1364,1367
+src-tauri/src/main.rs
+  75caf1947753620d 5,42,44-46,179-180,183,189,283-289,294-318,523,559-570,587-590,604,612
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.7",
+  "base_commit_sha": "26cb3fdc66d14809267faade1b60cd35b1718da6",
+  "prompts": {
+    "75caf1947753620d": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "conv_20260921_html_assets",
+        "model": "gpt-5"
+      },
+      "human_author": "qisiii",
+      "messages": [],
+      "total_additions": 93,
+      "total_deletions": 114,
+      "accepted_lines": 93,
+      "overriden_lines": 0
+    }
+  }
+}

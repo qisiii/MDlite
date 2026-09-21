@@ -1,0 +1,23 @@
+src/main.js
+  74b77ef8f854129c 24-25,30-36,123,1068,1085-1109,1112-1130,1258,1745-1747,1764-1813,1815-1818,1860-1861,1914-1925,1929,1952-1976,2062-2070
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.7",
+  "base_commit_sha": "9501c7887c08d916de7344d2e960b2e5988b98d8",
+  "prompts": {
+    "74b77ef8f854129c": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "conv_20260921_image_viewer_escape",
+        "model": "gpt-5"
+      },
+      "human_author": "qisiii",
+      "messages": [],
+      "total_additions": 166,
+      "total_deletions": 14,
+      "accepted_lines": 166,
+      "overriden_lines": 0
+    }
+  }
+}

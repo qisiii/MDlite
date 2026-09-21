@@ -2,18 +2,10 @@ use arboard::Clipboard;
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde::{Deserialize, Serialize};
 use std::{fs, io::Write, path::{Path, PathBuf}, sync::Mutex, time::{SystemTime, UNIX_EPOCH}};
-use tauri::{menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder}, AppHandle, Emitter, Manager, Runtime, State, WebviewWindow};
+use tauri::{menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder}, AppHandle, Emitter, Manager, Runtime, State};
 #[cfg(any(target_os = "macos", target_os = "ios", target_os = "android"))]
 use tauri::RunEvent;
 use tauri_plugin_clipboard_manager::ClipboardExt;
-#[cfg(target_os = "macos")]
-use objc2::sel;
-#[cfg(target_os = "macos")]
-use objc2_app_kit::{NSPrintInfo, NSPrintJobDisposition, NSPrintJobSavingURL, NSPrintSaveJob};
-#[cfg(target_os = "macos")]
-use objc2_foundation::{NSObjectProtocol, NSString, NSURL};
-#[cfg(target_os = "macos")]
-use objc2_web_kit::WKWebView;
 
 mod app_config;
 use app_config::APP_NAME;
@@ -47,11 +39,11 @@ struct ClipboardPaste {
   content: String,
 }
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct PdfExportResult {
-  path: String,
-  error: Option<String>,
+struct HtmlExportAsset {
+  source: String,
+  export_path: String,
 }
 
 #[derive(Serialize, Clone)]
@@ -184,62 +176,18 @@ fn save_markdown_file_as(path: String, content: String) -> Result<MarkdownDocume
 
 #[tauri::command]
 fn save_html_export(path: String, content: String) -> Result<(), String> {
+  let target = html_export_target(&path)?;
+  fs::write(target, content).map_err(|error| format!("无法导出 HTML：{}", error))
+}
+
+fn html_export_target(path: &str) -> Result<PathBuf, String> {
   let requested_path = PathBuf::from(path);
   let parent = requested_path.parent().ok_or("无法定位导出目录")?.canonicalize().map_err(|error| format!("导出目录无效：{}", error))?;
   if !parent.is_dir() { return Err("请选择有效的导出目录".into()); }
   let file_name = requested_path.file_name().and_then(|name| name.to_str()).ok_or("文件名无效")?;
   let mut file_name = safe_name(file_name)?;
   if !matches!(Path::new(&file_name).extension().and_then(|extension| extension.to_str()).map(|extension| extension.to_ascii_lowercase()), Some(ref extension) if extension == "html" || extension == "htm") { file_name.push_str(".html"); }
-  fs::write(parent.join(file_name), content).map_err(|error| format!("无法导出 HTML：{}", error))
-}
-
-fn pdf_export_target(path: String) -> Result<PathBuf, String> {
-  let requested_path = PathBuf::from(path);
-  let parent = requested_path.parent().ok_or("无法定位导出目录")?.canonicalize().map_err(|error| format!("导出目录无效：{}", error))?;
-  if !parent.is_dir() { return Err("请选择有效的导出目录".into()); }
-  let file_name = requested_path.file_name().and_then(|name| name.to_str()).ok_or("文件名无效")?;
-  let mut file_name = safe_name(file_name)?;
-  if !matches!(Path::new(&file_name).extension().and_then(|extension| extension.to_str()).map(|extension| extension.to_ascii_lowercase()), Some(ref extension) if extension == "pdf") { file_name.push_str(".pdf"); }
   Ok(parent.join(file_name))
-}
-
-#[cfg(target_os = "macos")]
-unsafe fn export_webview_pdf(webview: *mut std::ffi::c_void, target: &Path) -> Result<(), String> {
-  let webview = unsafe { &*(webview.cast::<WKWebView>()) };
-  if !webview.respondsToSelector(sel!(printOperationWithPrintInfo:)) { return Err("当前 macOS 版本不支持 PDF 导出".into()); }
-  let shared_info = NSPrintInfo::sharedPrintInfo();
-  let settings = shared_info.dictionary();
-  let target_path = NSString::from_str(&target.to_string_lossy());
-  let target_url = NSURL::fileURLWithPath(&target_path);
-  settings.insert(&*NSPrintJobSavingURL, &*target_url);
-  settings.insert(&*NSPrintJobDisposition, &*NSPrintSaveJob);
-  shared_info.setJobDisposition(&NSPrintSaveJob);
-  let operation = webview.printOperationWithPrintInfo(&shared_info);
-  operation.setShowsPrintPanel(false);
-  operation.setShowsProgressPanel(false);
-  if !operation.runOperation() || !target.is_file() { return Err("macOS 未能生成 PDF".into()); }
-  Ok(())
-}
-
-#[tauri::command]
-fn export_pdf(window: WebviewWindow, path: String) -> Result<String, String> {
-  let target = pdf_export_target(path)?;
-  let target_string = target.to_string_lossy().to_string();
-  #[cfg(target_os = "macos")]
-  {
-    let app = window.app_handle().clone();
-    let event_path = target_string.clone();
-    window.with_webview(move |webview| {
-      let error = unsafe { export_webview_pdf(webview.inner(), &target) }.err();
-      let _ = app.emit("pdf-export-finished", PdfExportResult { path: event_path, error });
-    }).map_err(|error| error.to_string())?;
-    Ok(target_string)
-  }
-  #[cfg(not(target_os = "macos"))]
-  {
-    let _ = window;
-    Err("PDF 导出目前仅支持 macOS".into())
-  }
 }
 
 fn safe_name(name: &str) -> Result<String, String> {
@@ -332,13 +280,42 @@ fn write_rgba_png(path: &Path, width: u32, height: u32, rgba: &[u8]) -> Result<(
 
 #[tauri::command]
 fn read_markdown_image(markdown_path: String, source: String) -> Result<String, String> {
+  let image_path = markdown_image_path(&markdown_path, &source)?;
+  let mime = image_mime(&image_path).ok_or("不支持的图片格式")?;
+  let bytes = fs::read(&image_path).map_err(|error| format!("无法读取图片：{}", error))?;
+  Ok(format!("data:{};base64,{}", mime, STANDARD.encode(bytes)))
+}
+
+fn markdown_image_path(markdown_path: &str, source: &str) -> Result<PathBuf, String> {
   let markdown_path = PathBuf::from(markdown_path).canonicalize().map_err(|error| format!("Markdown 文件无效：{}", error))?;
   let root = markdown_path.parent().ok_or("无法定位 Markdown 所在目录")?.canonicalize().map_err(|error| error.to_string())?;
   let image_path = root.join(source).canonicalize().map_err(|error| format!("无法读取图片：{}", error))?;
   if !image_path.starts_with(&root) { return Err("图片必须位于当前 Markdown 所在目录或其子目录中".into()); }
-  let mime = image_mime(&image_path).ok_or("不支持的图片格式")?;
-  let bytes = fs::read(&image_path).map_err(|error| format!("无法读取图片：{}", error))?;
-  Ok(format!("data:{};base64,{}", mime, STANDARD.encode(bytes)))
+  Ok(image_path)
+}
+
+#[tauri::command]
+fn copy_html_export_assets(markdown_path: String, html_path: String, sources: Vec<String>) -> Result<Vec<HtmlExportAsset>, String> {
+  let markdown_path = PathBuf::from(&markdown_path).canonicalize().map_err(|error| format!("Markdown 文件无效：{}", error))?;
+  let root = markdown_path.parent().ok_or("无法定位 Markdown 所在目录")?.canonicalize().map_err(|error| error.to_string())?;
+  let html_target = html_export_target(&html_path)?;
+  let asset_dir_name = format!("{}_files", html_target.file_stem().and_then(|name| name.to_str()).ok_or("HTML 文件名无效")?);
+  let asset_dir = html_target.parent().ok_or("无法定位导出目录")?.join(&asset_dir_name);
+  let mut assets = Vec::new();
+  for source in sources {
+    let image_path = markdown_image_path(&markdown_path.to_string_lossy(), &source)?;
+    image_mime(&image_path).ok_or("不支持的图片格式")?;
+    let relative = image_path.strip_prefix(&root).map_err(|_| "图片必须位于当前 Markdown 所在目录或其子目录中")?;
+    let destination = asset_dir.join(relative);
+    if image_path != destination {
+      let destination_parent = destination.parent().ok_or("无法定位图片导出目录")?;
+      fs::create_dir_all(destination_parent).map_err(|error| format!("无法创建图片导出目录：{}", error))?;
+      fs::copy(&image_path, &destination).map_err(|error| format!("无法复制图片：{}", error))?;
+    }
+    let relative_path = relative.to_string_lossy().replace('\\', "/");
+    assets.push(HtmlExportAsset { source, export_path: format!("{}/{}", asset_dir_name, relative_path) });
+  }
+  Ok(assets)
 }
 
 #[tauri::command]
@@ -523,7 +500,6 @@ fn build_application_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<tauri
   let reload = MenuItemBuilder::with_id("reload", "从磁盘重新载入").accelerator("CmdOrCtrl+R").build(app)?;
   let save = MenuItemBuilder::with_id("save", "保存").accelerator("CmdOrCtrl+S").build(app)?;
   let export_html = MenuItemBuilder::with_id("export-html", "导出 HTML…").accelerator("CmdOrCtrl+Shift+E").build(app)?;
-  let export_pdf = MenuItemBuilder::with_id("export-pdf", "导出 PDF…").accelerator("CmdOrCtrl+P").build(app)?;
   let mut recent_menu = SubmenuBuilder::new(app, "历史记录");
   let recent_entries = read_recent_entries(app);
   if recent_entries.is_empty() {
@@ -544,7 +520,7 @@ fn build_application_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<tauri
   let split_mode = MenuItemBuilder::with_id("mode-split", "分栏模式").accelerator("CmdOrCtrl+2").build(app)?;
   let preview_mode = MenuItemBuilder::with_id("mode-preview", "预览模式").accelerator("CmdOrCtrl+3").build(app)?;
   let global_search = MenuItemBuilder::with_id("global-search", "在目录中搜索…").accelerator("CmdOrCtrl+Shift+F").build(app)?;
-  let file_menu = SubmenuBuilder::new(app, "文件").item(&new_markdown).item(&new_folder).separator().item(&open_folder).item(&open_file).item(&recent_menu).item(&reload).item(&close_document).separator().item(&insert_image).item(&paste_image).separator().item(&save).item(&export_html).item(&export_pdf).build()?;
+  let file_menu = SubmenuBuilder::new(app, "文件").item(&new_markdown).item(&new_folder).separator().item(&open_folder).item(&open_file).item(&recent_menu).item(&reload).item(&close_document).separator().item(&insert_image).item(&paste_image).separator().item(&save).item(&export_html).build()?;
   let edit_menu = SubmenuBuilder::new(app, "编辑").item(&undo).item(&redo).separator().item(&cut_selection).item(&copy_selection).separator().item(&find_replace).item(&global_search).build()?;
   let view_menu = SubmenuBuilder::new(app, "视图").item(&edit_mode).item(&split_mode).item(&preview_mode).build()?;
   MenuBuilder::new(app).item(&app_menu).item(&file_menu).item(&edit_menu).item(&view_menu).build()
@@ -580,6 +556,20 @@ fn take_opened_markdown_files(opened_files: State<OpenedMarkdownFiles>) -> Vec<S
   std::mem::take(&mut state.paths)
 }
 
+fn open_markdown_path(app: &AppHandle, path: &Path) {
+  if !is_markdown(path) { return; }
+  let path = path.to_string_lossy().to_string();
+  let opened_files = app.state::<OpenedMarkdownFiles>();
+  let mut state = opened_files.state.lock().unwrap_or_else(|error| error.into_inner());
+  if state.paths.iter().any(|queued| queued == &path) { return; }
+  if state.frontend_ready {
+    drop(state);
+    let _ = app.emit("open-markdown-file", path);
+  } else {
+    state.paths.push(path);
+  }
+}
+
 fn main() {
   tauri::Builder::default()
     .plugin(tauri_plugin_dialog::init())
@@ -594,6 +584,10 @@ fn main() {
         let _ = append_error_log(&panic_app, "rust-panic", &info.to_string());
         default_panic_hook(info);
       }));
+      for argument in std::env::args_os().skip(1) {
+        let path = PathBuf::from(argument);
+        if path.is_file() { open_markdown_path(&app.handle(), &path); }
+      }
       // macOS requires an application submenu before the functional menus.
       app.set_menu(build_application_menu(&app.handle())?)?;
       app.on_menu_event(move |app_handle, event| match event.id().0.as_str() {
@@ -607,7 +601,7 @@ fn main() {
       });
       Ok(())
     })
-    .invoke_handler(tauri::generate_handler![load_markdown_folder, read_markdown_file, save_markdown_file, save_markdown_file_as, save_html_export, export_pdf, create_markdown_folder, create_markdown_file, read_markdown_image, save_markdown_image, import_markdown_image, paste_markdown_clipboard, report_error, copy_markdown_text, read_clipboard_text, remember_recent, load_recent_documents, load_workspace_session, save_workspace_session, take_opened_markdown_files])
+    .invoke_handler(tauri::generate_handler![load_markdown_folder, read_markdown_file, save_markdown_file, save_markdown_file_as, save_html_export, copy_html_export_assets, create_markdown_folder, create_markdown_file, read_markdown_image, save_markdown_image, import_markdown_image, paste_markdown_clipboard, report_error, copy_markdown_text, read_clipboard_text, remember_recent, load_recent_documents, load_workspace_session, save_workspace_session, take_opened_markdown_files])
     .build(tauri::generate_context!())
     .unwrap_or_else(|error| panic!("启动 {} 失败：{}", APP_NAME, error))
     .run(|app_handle, event| {
@@ -615,17 +609,7 @@ fn main() {
       if let RunEvent::Opened { urls } = event {
         for url in urls {
           if let Ok(path) = url.to_file_path() {
-            if is_markdown(&path) {
-              let path = path.to_string_lossy().to_string();
-              let opened_files = app_handle.state::<OpenedMarkdownFiles>();
-              let mut state = opened_files.state.lock().unwrap_or_else(|error| error.into_inner());
-              if state.frontend_ready {
-                drop(state);
-                let _ = app_handle.emit("open-markdown-file", path);
-              } else {
-                state.paths.push(path);
-              }
-            }
+            open_markdown_path(app_handle, &path);
           }
         }
       }

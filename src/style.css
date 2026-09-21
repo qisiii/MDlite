@@ -224,9 +224,3 @@ html[data-theme="dark"] .table-tools-divider { background:#40506b; }
 .global-search-result-excerpt { margin-top:2px; color:var(--muted); font:12px ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace; }
 .global-search-status { min-height:42px; margin:0; padding:12px 16px; color:var(--muted); font-size:12px; }
 html[data-theme="dark"] .global-search-result-title { color:var(--ink); }
-@media print {
-  .topbar,.sidebar,.editor-pane,.theme-toggle,.outline-layer { display:none !important; }
-  body,#workspace,#workspace[data-mode="split"],#workspace[data-mode="preview"],.preview-pane,.preview-content { display:block !important; height:auto !important; min-width:0 !important; background:#fff !important; }
-  .preview-content .pane-title { display:none !important; }
-  .document { padding:0 !important; color:#000 !important; }
-}

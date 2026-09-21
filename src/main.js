@@ -1182,13 +1182,13 @@ function setDocumentOutlineCollapsed(collapsed) {
   ui.outlineToggle.setAttribute("aria-label", ui.outlineToggle.title);
   ui.outlineToggle.setAttribute("aria-expanded", String(!collapsed));
 }
-async function hydrateLocalImages() {
-  if (!state.current?.path) return;
-  const images = [...ui.preview.querySelectorAll("img[src]")];
+async function hydrateLocalImages(root = ui.preview, markdownPath = state.current?.path) {
+  if (!markdownPath) return;
+  const images = [...root.querySelectorAll("img[src]")];
   await Promise.all(images.map(async image => {
     const source = image.getAttribute("src") || "";
     if (!source || /^(https?:|data:|blob:)/i.test(source)) return;
-    try { image.src = await invoke("read_markdown_image", { markdownPath: state.current.path, source: decodeURIComponent(source) }); }
+    try { image.src = await invoke("read_markdown_image", { markdownPath, source: decodeURIComponent(source) }); }
     catch { image.alt = `${image.alt || "图片"}（无法读取本地图片）`; }
   }));
 }
@@ -1310,10 +1310,23 @@ async function saveCurrent() {
     setDirty(false); setSaveState("已保存", "ok"); return true;
   } catch (error) { void reportAppError("document-save", error); setSaveState(`保存失败：${error}`, "error"); return false; }
 }
-function exportHtmlDocument() {
-  const title = escapeHtml((state.current?.relativePath || "Markdown 文档").replace(/\.(md|markdown)$/i, ""));
-  const contents = sanitizeHtml(renderMarkdown(editorValue()));
-  return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${title}</title><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.22/dist/katex.min.css"><style>body{max-width:900px;margin:40px auto;padding:0 24px;color:#202733;font:16px/1.7 -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif}pre{overflow:auto;padding:14px;border-radius:8px;background:#202733;color:#e6edf3}code{padding:.1em .3em;border-radius:4px;background:#f1f3f5}pre code{padding:0;background:transparent}img{max-width:100%;height:auto}table{width:100%;border-collapse:collapse}th,td{padding:8px 10px;border:1px solid #d9e2f0;text-align:left;vertical-align:top}th{background:#eef4ff}.math-block{overflow:auto;margin:1em 0;text-align:center}</style></head><body>${contents}</body></html>`;
+function localExportImageSources(root) {
+  return [...new Set([...root.querySelectorAll("img[src]")].map(image => image.getAttribute("src") || "").filter(source => source && !/^(https?:|data:|blob:)/i.test(source)).map(source => decodeURIComponent(source)))];
+}
+async function exportHtmlDocument(destination) {
+  const current = state.current;
+  const title = escapeHtml((current?.relativePath || "Markdown 文档").replace(/\.(md|markdown)$/i, ""));
+  const container = document.createElement("div");
+  container.innerHTML = sanitizeHtml(renderMarkdown(editorValue()));
+  const sources = localExportImageSources(container);
+  const assets = await invoke("copy_html_export_assets", { markdownPath: current.path, htmlPath: destination, sources });
+  const assetPaths = new Map(assets.map(asset => [asset.source, asset.exportPath]));
+  for (const image of container.querySelectorAll("img[src]")) {
+    const source = image.getAttribute("src") || "";
+    if (/^(https?:|data:|blob:)/i.test(source)) continue;
+    image.setAttribute("src", encodeURI(assetPaths.get(decodeURIComponent(source)) || source));
+  }
+  return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${title}</title><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.22/dist/katex.min.css"><style>body{max-width:900px;margin:40px auto;padding:0 24px;color:#202733;font:16px/1.7 -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif}pre{overflow:auto;padding:14px;border-radius:8px;background:#202733;color:#e6edf3}code{padding:.1em .3em;border-radius:4px;background:#f1f3f5}pre code{padding:0;background:transparent}img{max-width:100%;height:auto}table{width:100%;border-collapse:collapse}th,td{padding:8px 10px;border:1px solid #d9e2f0;text-align:left;vertical-align:top}th{background:#eef4ff}.math-block{overflow:auto;margin:1em 0;text-align:center}</style></head><body>${container.innerHTML}</body></html>`;
 }
 async function exportHtml() {
   if (!state.current) { setSaveState("请先打开一个 Markdown 文档", "error"); return; }
@@ -1321,23 +1334,9 @@ async function exportHtml() {
   const destination = await save({ defaultPath, filters: [{ name: "HTML", extensions: ["html"] }], title: "导出 HTML" });
   if (!destination) return;
   try {
-    await invoke("save_html_export", { path: destination, content: exportHtmlDocument() });
+    await invoke("save_html_export", { path: destination, content: await exportHtmlDocument(destination) });
     setSaveState("已导出 HTML", "ok");
   } catch (error) { void reportAppError("html-export", error); setSaveState(`导出 HTML 失败：${error}`, "error"); }
-}
-async function exportPdf() {
-  if (!state.current) { setSaveState("请先打开一个 Markdown 文档", "error"); return; }
-  const defaultPath = (state.current.relativePath || "未命名.md").replace(/\.(md|markdown)$/i, ".pdf");
-  const destination = await save({ defaultPath, filters: [{ name: "PDF", extensions: ["pdf"] }], title: "导出 PDF" });
-  if (!destination) return;
-  if (state.dirty) await renderPreview();
-  setMode("preview");
-  setSaveState("正在导出 PDF…");
-  try {
-    await invoke("export_pdf", { path: destination });
-  } catch (error) {
-    void reportAppError("pdf-export", error); setSaveState(`导出 PDF 失败：${error}`, "error");
-  }
 }
 function cancelAutoSave() {
   window.clearTimeout(state.autoSaveTimer);
@@ -1352,17 +1351,20 @@ async function autoSaveCurrent() {
   state.autoSaveTimer = null;
   const current = state.current;
   if (!current?.path || !state.dirty || state.reloadConflict) return;
-  if (!await checkDiskVersion()) return;
+  const path = current.path;
   const content = editorValue();
+  if (!await checkDiskVersion()) return;
+  if (state.current !== current || editorValue() !== content || state.reloadConflict) return;
   try {
-    await invoke("save_markdown_file", { path: current.path, content });
-    if (state.current?.path !== current.path || editorValue() !== content) return;
+    await invoke("save_markdown_file", { path, content });
     current.content = content;
-    setDirty(false);
-    setSaveState("已自动保存", "ok");
+    if (state.current === current && editorValue() === content) {
+      setDirty(false);
+      setSaveState("已自动保存", "ok");
+    }
   } catch (error) {
     void reportAppError("document-auto-save", error);
-    setSaveState(`自动保存失败：${error}`, "error");
+    if (state.current === current) setSaveState(`自动保存失败：${error}`, "error");
   }
 }
 async function closeCurrentDocument() {
@@ -1895,7 +1897,6 @@ listen("menu-action", event => {
     case "new-folder": openCreate("folder"); break;
     case "save": saveCurrent(); break;
     case "export-html": exportHtml(); break;
-    case "export-pdf": exportPdf(); break;
     case "reload": checkDiskVersion(true); break;
     case "find-replace": openFindReplace(); break;
     case "global-search": openGlobalSearch(); break;
@@ -1910,11 +1911,6 @@ listen("open-recent-item", event => {
   if (event.payload?.kind === "folder") openMarkdownFolder(event.payload.path);
   else if (event.payload?.kind === "file") openMarkdownPath(event.payload.path);
 });
-listen("pdf-export-finished", event => {
-  const result = event.payload;
-  if (result.error) { void reportAppError("pdf-export", result.error); setSaveState(`导出 PDF 失败：${result.error}`, "error"); }
-  else setSaveState("已导出 PDF", "ok");
-});
 document.addEventListener("keydown", event => {
   const shortcut = event.metaKey || event.ctrlKey, key = event.key.toLowerCase();
   if (isImeComposing(event)) return;
@@ -1924,7 +1920,6 @@ document.addEventListener("keydown", event => {
   if (shortcut && key === "s") { event.preventDefault(); saveCurrent(); }
   if (shortcut && event.shiftKey && key === "f") { event.preventDefault(); openGlobalSearch(); }
   if (shortcut && event.shiftKey && key === "e") { event.preventDefault(); exportHtml(); }
-  if (shortcut && key === "p") { event.preventDefault(); exportPdf(); }
   if (shortcut && !event.shiftKey && (key === "f" || key === "h") && isPreviewMode()) { event.preventDefault(); openFindReplace(); }
 });
 applyTheme(automaticTheme());

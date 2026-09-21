@@ -65,6 +65,12 @@
         <div id="modalCanvas"></div>
       </div>
     </section>
+    <section id="imageModal" hidden aria-modal="true" role="dialog" aria-labelledby="imageModalTitle" tabindex="-1">
+      <div class="modal-dialog image-modal-dialog">
+        <header><strong id="imageModalTitle">图片预览</strong><span class="grow"></span><button data-image-modal-action="out" aria-label="缩小">−</button><span id="imageZoom">100%</span><button data-image-modal-action="in" aria-label="放大">+</button><button data-image-modal-action="close">关闭</button></header>
+        <div id="imageCanvas" aria-label="图片查看区域"></div>
+      </div>
+    </section>
     <section id="createModal" hidden aria-modal="true" role="dialog" aria-label="新建文件或文件夹">
       <div class="find-dialog">
         <header><strong id="createTitle">新建 Markdown 文档</strong><span class="grow"></span><button data-create-action="close">关闭</button></header>

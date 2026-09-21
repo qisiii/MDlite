@@ -136,6 +136,20 @@ html[data-theme="dark"] .document .callout.callout-success,html[data-theme="dark
 
 .theme-toggle { position:fixed; bottom:14px; left:14px; z-index:7; display:grid; width:38px; height:38px; padding:0; place-items:center; border-radius:50%; box-shadow:0 4px 14px rgba(15,23,42,.2); font-size:20px; line-height:1; }
 
+/* The chart viewer should use the available window, including on wide screens. */
+#mermaidModal { padding:8px; }
+#mermaidModal .modal-dialog { width:100%; height:100%; border-radius:8px; }
+
+/* Markdown images open in a lightweight, local viewer. */
+.document img { cursor:zoom-in; }
+#imageModal[hidden] { display:none; }
+#imageModal { position:fixed; inset:0; z-index:10; display:grid; place-items:center; padding:20px; background:rgba(15,23,42,.62); }
+#imageZoom { min-width:42px; color:var(--muted); text-align:center; }
+#imageCanvas { flex:1; overflow:auto; padding:28px; background:#f8fafc; cursor:grab; }
+#imageCanvas.panning { cursor:grabbing; user-select:none; }
+.image-viewer-image { display:block; max-width:none; margin:auto; border:0; border-radius:0; background:transparent; cursor:grab; }
+#imageCanvas.panning .image-viewer-image { cursor:grabbing; }
+
 /* Center diagrams that fit; overflowing diagrams retain a left origin for panning. */
 #modalCanvas .mermaid { display:flex; justify-content:center; }
 
@@ -199,7 +213,11 @@ html[data-theme="dark"] .table-tools-label { color:#b8c4d8; }
 html[data-theme="dark"] .table-tools-format { color:#d8e4ff; background:#263b63; }
 html[data-theme="dark"] .table-tools-divider { background:#40506b; }
 .document pre code.hljs { overflow-x:visible; background:transparent; }
-.mermaid-box > .mermaid > svg { width:auto !important; max-width:100% !important; height:auto !important; }
+/* Mermaid sets self-message connectors as SVG paths. Keep them as outlines so
+   a self call does not collapse into a filled black shape in WebKit. */
+.mermaid-box .messageLine0,.mermaid-box .messageLine1 { fill:none !important; stroke:#333 !important; stroke-width:1.5px !important; }
+/* Full-width document diagrams are more readable at a restrained, centered size. */
+.mermaid-box.body-mermaid-box:not(.gantt-box) > .mermaid > svg { width:50% !important; max-width:50% !important; height:auto !important; }
 /* Gantt is a scaled time axis, not a diagram that can safely be shrunk. */
 .mermaid-box.gantt-box { overflow-x:auto; }
 .mermaid-box.gantt-box > .mermaid { justify-content:flex-start; min-width:900px; }

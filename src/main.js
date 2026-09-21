@@ -21,13 +21,19 @@ import "./style.css";
 
 const APP_VERSION = __APP_VERSION__;
 const APP_NAME = __APP_NAME__;
-const ui = Object.fromEntries(["appVersion", "saveState", "fileTree", "fileCount", "recentList", "editor", "currentPath", "dirtyMark", "preview", "previewState", "workspace", "documentOutline", "outlineToggle", "themeToggle", "mermaidModal", "modalCanvas", "modalZoom", "findReplaceModal", "findText", "replaceText", "findStatus", "tableTools", "createModal", "createTitle", "createName", "createTarget", "globalSearchModal", "globalSearchText", "globalSearchResults", "globalSearchStatus", "reloadModal", "reloadFileName", "reloadMessage"].map(id => [id, document.getElementById(id)]));
-const state = { roots: new Map(), docs: new Map(), recentDocuments: [], selectedFolder: null, activeRoot: null, expandedFolders: new Set(), current: null, dirty: false, mermaidSequence: 0, fullscreen: null, createKind: null, pasteShortcutToken: null, findPasteToken: null, previewMatch: null, reloadCheckPromise: null, reloadConflict: null, restoringSession: false, sessionSaveQueue: Promise.resolve(), themeTimer: null, autoSaveTimer: null };
+const ui = Object.fromEntries(["appVersion", "saveState", "fileTree", "fileCount", "recentList", "editor", "currentPath", "dirtyMark", "preview", "previewState", "workspace", "documentOutline", "outlineToggle", "themeToggle", "mermaidModal", "modalCanvas", "modalZoom", "imageModal", "imageModalTitle", "imageCanvas", "imageZoom", "findReplaceModal", "findText", "replaceText", "findStatus", "tableTools", "createModal", "createTitle", "createName", "createTarget", "globalSearchModal", "globalSearchText", "globalSearchResults", "globalSearchStatus", "reloadModal", "reloadFileName", "reloadMessage"].map(id => [id, document.getElementById(id)]));
+const state = { roots: new Map(), docs: new Map(), recentDocuments: [], selectedFolder: null, activeRoot: null, expandedFolders: new Set(), current: null, dirty: false, mermaidSequence: 0, fullscreen: null, imageViewer: null, createKind: null, pasteShortcutToken: null, findPasteToken: null, previewMatch: null, reloadCheckPromise: null, reloadConflict: null, restoringSession: false, sessionSaveQueue: Promise.resolve(), themeTimer: null, autoSaveTimer: null };
 let editorView = null;
 let selectionFormatMenu = null;
 let folderContextMenu = null;
 const MERMAID_GANTT_CONFIG = { useWidth: 900, useMaxWidth: false };
-mermaid.initialize({ startOnLoad: false, securityLevel: "strict", theme: "neutral", gantt: MERMAID_GANTT_CONFIG });
+const MERMAID_SEQUENCE_CONFIG = {
+  rightAngles: true,
+  actorFontFamily: '-apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif',
+  messageFontFamily: '-apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif',
+  noteFontFamily: '-apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif'
+};
+mermaid.initialize({ startOnLoad: false, securityLevel: "strict", theme: "neutral", gantt: MERMAID_GANTT_CONFIG, sequence: MERMAID_SEQUENCE_CONFIG });
 const SANITIZE_CONFIG = {
   ALLOWED_TAGS: ["a", "blockquote", "br", "code", "del", "details", "div", "em", "h1", "h2", "h3", "h4", "h5", "h6", "hr", "img", "input", "kbd", "li", "mark", "nav", "ol", "p", "pre", "section", "small", "span", "strong", "sub", "summary", "sup", "table", "tbody", "td", "tfoot", "th", "thead", "tr", "u", "ul"],
   ALLOWED_ATTR: ["align", "alt", "checked", "class", "colspan", "data-feishu-table", "disabled", "height", "href", "id", "name", "open", "rowspan", "scope", "src", "start", "style", "title", "type", "width"],
@@ -114,7 +120,7 @@ function setSaveState(text, kind = "") { ui.saveState.textContent = text; ui.sav
 function setDirty(value) { state.dirty = value; ui.dirtyMark.textContent = value ? "● 未保存" : ""; }
 function automaticTheme(now = new Date()) { const hour = now.getHours(); return hour >= 7 && hour < 18 ? "light" : "dark"; }
 function configureMermaidTheme(theme) {
-  mermaid.initialize({ startOnLoad: false, securityLevel: "strict", theme: theme === "dark" ? "dark" : "neutral", gantt: MERMAID_GANTT_CONFIG });
+  mermaid.initialize({ startOnLoad: false, securityLevel: "strict", theme: theme === "dark" ? "dark" : "neutral", gantt: MERMAID_GANTT_CONFIG, sequence: MERMAID_SEQUENCE_CONFIG });
 }
 function applyTheme(theme) {
   const changed = document.documentElement.dataset.theme !== theme;
@@ -1059,6 +1065,7 @@ function prepareMermaidBlocks(root) {
     // Mermaid derives Gantt coordinates from this container before creating
     // the SVG, so do not let a narrow split view compress its time axis.
     if (/^\s*gantt\b/i.test(diagram.textContent)) diagram.parentElement?.classList.add("gantt-box");
+    if (!diagram.closest("table")) diagram.parentElement?.classList.add("body-mermaid-box");
     const actions = document.createElement("div");
     actions.className = "mermaid-actions";
     const sourceButton = document.createElement("button");
@@ -1075,11 +1082,52 @@ function prepareMermaidBlocks(root) {
     diagram.after(source);
   });
 }
-function fitMermaidDiagrams(root) {
-  root.querySelectorAll(".mermaid-box > .mermaid > svg").forEach(svg => {
-    svg.style.setProperty("max-width", "100%", "important");
-    svg.style.setProperty("width", "auto", "important");
-    svg.style.setProperty("height", "auto", "important");
+
+function normalizeMermaidSelfMessages(root) {
+  // Mermaid's arrow marker for a sequence self-call is painted as a solid
+  // black blob by WebKit in some layouts. Preserve the connector path, but
+  // drop that marker for self-calls only. Its label is initially anchored to
+  // the lifeline even though the self-call loop extends to the right.
+  root.querySelectorAll('.mermaid > svg path.messageLine0, .mermaid > svg path.messageLine1').forEach(path => {
+    const isSelfCall = path.dataset.from === path.dataset.to
+      || /(?:^|[\s,])V(?:[\s,]|$)/.test(path.getAttribute("d") || "");
+    if (!isSelfCall) return;
+    path.removeAttribute("marker-start");
+    path.removeAttribute("marker-end");
+    path.setAttribute("fill", "none");
+    path.setAttribute("stroke", "#333");
+    path.setAttribute("stroke-width", "1.5");
+    path.setAttribute("vector-effect", "non-scaling-stroke");
+
+    const loop = path.getBBox(), labelX = Math.round(loop.x + loop.width / 2);
+    let label = path.previousElementSibling;
+    while (label?.matches("text.messageText")) {
+      label.setAttribute("x", String(labelX));
+      label.setAttribute("text-anchor", "middle");
+      label.querySelectorAll("tspan").forEach(span => span.setAttribute("x", String(labelX)));
+      label = label.previousElementSibling;
+    }
+  });
+}
+
+function centerMermaidActorLabels(root) {
+  // Mermaid writes `text-anchor: middle` as a CSS style. WebKit can ignore
+  // that style on SVG tspans, leaving a participant name left-aligned at the
+  // lifeline. Footer participants have no `data-et` marker, so use every
+  // top/bottom actor box as the authoritative center instead.
+  root.querySelectorAll('.mermaid > svg rect.actor.actor-top, .mermaid > svg rect.actor.actor-bottom').forEach(box => {
+    const participant = box.parentElement, x = Number(box.getAttribute("x")), width = Number(box.getAttribute("width"));
+    if (!Number.isFinite(x) || !Number.isFinite(width)) return;
+    const center = String(Math.round(x + width / 2));
+    participant?.querySelectorAll("text.actor").forEach(label => {
+      label.setAttribute("x", center);
+      label.setAttribute("text-anchor", "middle");
+      label.style.setProperty("text-anchor", "middle", "important");
+      label.querySelectorAll("tspan").forEach(span => {
+        span.setAttribute("x", center);
+        span.setAttribute("text-anchor", "middle");
+      });
+    });
   });
 }
 function prepareCodeBlocks(root) {
@@ -1207,7 +1255,7 @@ async function renderPreview() {
   ui.preview.innerHTML = sanitizeHtml(renderMarkdown(editorValue()));
   clearPreviewFindHighlights(); processRawCells(ui.preview); ui.preview.innerHTML = sanitizeHtml(ui.preview.innerHTML); prepareTaskLists(ui.preview); prepareMermaidBlocks(ui.preview); prepareCodeBlocks(ui.preview); addHeadingIds(ui.preview); prepareTocs(ui.preview); prepareCallouts(ui.preview); prepareNamedAnchors(ui.preview); renderDocumentOutline(); wrapTables(ui.preview); state.previewMatch = null; await hydrateLocalImages();
   const diagrams = [...ui.preview.querySelectorAll(".mermaid")];
-  if (diagrams.length) { diagrams.forEach(node => node.id = `mermaid-${++state.mermaidSequence}`); try { await mermaid.run({ nodes: diagrams }); fitMermaidDiagrams(ui.preview); } catch (error) { void reportAppError("mermaid-render", error); ui.previewState.textContent = "部分 Mermaid 图显示源码"; return; } }
+  if (diagrams.length) { diagrams.forEach(node => node.id = `mermaid-${++state.mermaidSequence}`); try { await mermaid.run({ nodes: diagrams }); await new Promise(requestAnimationFrame); normalizeMermaidSelfMessages(ui.preview); centerMermaidActorLabels(ui.preview); } catch (error) { void reportAppError("mermaid-render", error); ui.previewState.textContent = "部分 Mermaid 图显示源码"; return; } }
   ui.previewState.textContent = "";
 }
 
@@ -1694,7 +1742,9 @@ function openFullscreen(box) {
   const diagram = box?.querySelector(".mermaid"), svg = diagram?.querySelector("svg"); if (!diagram || !svg) return;
   const viewBox = (svg.getAttribute("viewBox") || "").split(/[ ,]+/).map(Number), width = viewBox[2] || Number(svg.getAttribute("width")), height = viewBox[3] || Number(svg.getAttribute("height"));
   if (!width || !height) return;
-  state.fullscreen = { diagram, parent: diagram.parentNode, next: diagram.nextSibling, width, height, zoom: 1 };
+  // The original SVG is moved into the modal so Mermaid's generated defs and
+  // links remain valid. Keep its inline sizing intact for when it goes back.
+  state.fullscreen = { diagram, parent: diagram.parentNode, next: diagram.nextSibling, svgStyle: svg.getAttribute("style"), width, height, zoom: 1 };
   ui.modalCanvas.append(diagram); ui.mermaidModal.hidden = false; document.body.classList.add("modal-open"); applyFullscreenZoom(1);
 }
 function applyFullscreenZoom(next, clientX = null, clientY = null) {
@@ -1711,7 +1761,62 @@ function applyFullscreenZoom(next, clientX = null, clientY = null) {
     ui.modalCanvas.scrollTop += bounds.top + localY * zoom - clientY;
   });
 }
-function closeFullscreen() { if (!state.fullscreen) return; const { diagram, parent, next } = state.fullscreen; parent.insertBefore(diagram, next); state.fullscreen = null; ui.modalCanvas.classList.remove("panning"); ui.mermaidModal.hidden = true; document.body.classList.remove("modal-open"); }
+function closeFullscreen() {
+  if (!state.fullscreen) return;
+  const { diagram, parent, next, svgStyle } = state.fullscreen, svg = diagram.querySelector("svg");
+  if (svgStyle === null) svg?.removeAttribute("style"); else svg?.setAttribute("style", svgStyle);
+  parent.insertBefore(diagram, next); state.fullscreen = null; ui.modalCanvas.classList.remove("panning"); ui.mermaidModal.hidden = true; document.body.classList.remove("modal-open");
+}
+document.addEventListener("keydown", event => {
+  if (event.key !== "Escape" || !state.fullscreen) return;
+  // Handle this before macOS receives Esc as a request to leave the native
+  // window's fullscreen mode. Esc closes the in-app chart dialog first.
+  event.preventDefault();
+  event.stopImmediatePropagation();
+  closeFullscreen();
+}, true);
+
+function viewerFitZoom(width, height) {
+  const availableWidth = Math.max(1, ui.imageCanvas.clientWidth - 56), availableHeight = Math.max(1, ui.imageCanvas.clientHeight - 56);
+  return Math.min(1, availableWidth / width, availableHeight / height);
+}
+function openImageViewer(source) {
+  const url = source.currentSrc || source.src;
+  if (!url) return;
+  const image = document.createElement("img");
+  image.className = "image-viewer-image"; image.src = url; image.alt = source.alt || "图片预览";
+  ui.imageModalTitle.textContent = source.alt || "图片预览";
+  ui.imageCanvas.replaceChildren(image); ui.imageModal.hidden = false; document.body.classList.add("modal-open");
+  const initialise = () => {
+    const width = image.naturalWidth || source.naturalWidth, height = image.naturalHeight || source.naturalHeight;
+    if (!width || !height) return;
+    const initialZoom = viewerFitZoom(width, height);
+    state.imageViewer = { image, width, height, zoom: initialZoom, initialZoom };
+    applyImageViewerZoom(initialZoom);
+  };
+  state.imageViewer = { image, width: 0, height: 0, zoom: 1, initialZoom: 1 };
+  if (image.complete) initialise(); else image.addEventListener("load", initialise, { once: true });
+  ui.imageModal.querySelector('[data-image-modal-action="close"]').focus();
+}
+function applyImageViewerZoom(next, clientX = null, clientY = null) {
+  const viewer = state.imageViewer;
+  if (!viewer?.width || !viewer.height) return;
+  const zoom = Math.max(.1, Math.min(6, next)), previousZoom = viewer.zoom, previousBounds = viewer.image.getBoundingClientRect();
+  const localX = clientX === null ? null : (clientX - previousBounds.left) / previousZoom;
+  const localY = clientY === null ? null : (clientY - previousBounds.top) / previousZoom;
+  viewer.zoom = zoom; viewer.image.style.width = `${Math.round(viewer.width * zoom)}px`; viewer.image.style.height = `${Math.round(viewer.height * zoom)}px`; ui.imageZoom.textContent = `${Math.round(zoom * 100)}%`;
+  if (localX === null || localY === null) return;
+  window.requestAnimationFrame(() => {
+    if (state.imageViewer !== viewer || viewer.zoom !== zoom) return;
+    const bounds = viewer.image.getBoundingClientRect();
+    ui.imageCanvas.scrollLeft += bounds.left + localX * zoom - clientX;
+    ui.imageCanvas.scrollTop += bounds.top + localY * zoom - clientY;
+  });
+}
+function closeImageViewer() {
+  if (!state.imageViewer) return;
+  state.imageViewer = null; ui.imageCanvas.replaceChildren(); ui.imageCanvas.classList.remove("panning"); ui.imageModal.hidden = true; document.body.classList.remove("modal-open");
+}
 
 ui.outlineToggle.addEventListener("click", () => setDocumentOutlineCollapsed(!ui.preview.closest(".preview-pane").classList.contains("outline-collapsed")));
 ui.themeToggle.addEventListener("click", () => applyTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark"));
@@ -1752,6 +1857,8 @@ getCurrentWindow().onDragDropEvent(event => {
   }
 });
 ui.preview.addEventListener("click", event => {
+  const image = event.target.closest("img");
+  if (image) { event.preventDefault(); openImageViewer(image); return; }
   const codeCollapse = event.target.closest("[data-code-collapse]");
   if (codeCollapse) {
     const block = codeCollapse.closest(".code-block"), collapsed = block?.classList.toggle("collapsed");
@@ -1804,10 +1911,22 @@ ui.preview.addEventListener("click", event => {
   else setSaveState("未在当前目录中找到链接的 Markdown 文件", "error");
 });
 ui.mermaidModal.addEventListener("click", event => { const action = event.target.dataset.modalAction; if (event.target === ui.mermaidModal || action === "close") closeFullscreen(); else if (action === "in") applyFullscreenZoom(state.fullscreen.zoom + .25); else if (action === "out") applyFullscreenZoom(state.fullscreen.zoom - .25); });
+ui.imageModal.addEventListener("click", event => {
+  const action = event.target.dataset.imageModalAction;
+  if (event.target === ui.imageModal || action === "close") closeImageViewer();
+  else if (action === "in") applyImageViewerZoom(state.imageViewer.zoom + .25);
+  else if (action === "out") applyImageViewerZoom(state.imageViewer.zoom - .25);
+});
+function zoomWheelStep(event) {
+  // Trackpads emit many small pixel deltas; keep those increments smooth while
+  // preserving a practical step for conventional line-based mouse wheels.
+  const multiplier = event.deltaMode === 1 ? .015 : .0005;
+  return Math.min(.1, Math.max(.01, Math.abs(event.deltaY) * multiplier));
+}
 ui.modalCanvas.addEventListener("wheel", event => {
   if (!state.fullscreen || !event.deltaY) return;
   event.preventDefault();
-  const step = Math.min(.25, Math.max(.05, Math.abs(event.deltaY) * .002));
+  const step = zoomWheelStep(event);
   applyFullscreenZoom(state.fullscreen.zoom + (event.deltaY < 0 ? step : -step), event.clientX, event.clientY);
 }, { passive: false });
 ui.modalCanvas.addEventListener("dblclick", () => applyFullscreenZoom(1));
@@ -1830,6 +1949,31 @@ function stopFullscreenPan(event) {
 }
 ui.modalCanvas.addEventListener("pointerup", stopFullscreenPan);
 ui.modalCanvas.addEventListener("pointercancel", stopFullscreenPan);
+ui.imageCanvas.addEventListener("wheel", event => {
+  if (!state.imageViewer?.width || !event.deltaY) return;
+  event.preventDefault();
+  const step = zoomWheelStep(event);
+  applyImageViewerZoom(state.imageViewer.zoom + (event.deltaY < 0 ? step : -step), event.clientX, event.clientY);
+}, { passive: false });
+ui.imageCanvas.addEventListener("dblclick", () => { if (state.imageViewer) applyImageViewerZoom(state.imageViewer.initialZoom); });
+ui.imageCanvas.addEventListener("pointerdown", event => {
+  if (!state.imageViewer || event.button !== 0) return;
+  state.imageViewer.pan = { pointerId: event.pointerId, clientX: event.clientX, clientY: event.clientY, scrollLeft: ui.imageCanvas.scrollLeft, scrollTop: ui.imageCanvas.scrollTop };
+  ui.imageCanvas.setPointerCapture(event.pointerId); ui.imageCanvas.classList.add("panning"); event.preventDefault();
+});
+ui.imageCanvas.addEventListener("pointermove", event => {
+  const pan = state.imageViewer?.pan;
+  if (!pan || pan.pointerId !== event.pointerId) return;
+  ui.imageCanvas.scrollLeft = pan.scrollLeft - (event.clientX - pan.clientX); ui.imageCanvas.scrollTop = pan.scrollTop - (event.clientY - pan.clientY);
+});
+function stopImageViewerPan(event) {
+  const pan = state.imageViewer?.pan;
+  if (!pan || pan.pointerId !== event.pointerId) return;
+  if (ui.imageCanvas.hasPointerCapture(event.pointerId)) ui.imageCanvas.releasePointerCapture(event.pointerId);
+  delete state.imageViewer.pan; ui.imageCanvas.classList.remove("panning");
+}
+ui.imageCanvas.addEventListener("pointerup", stopImageViewerPan);
+ui.imageCanvas.addEventListener("pointercancel", stopImageViewerPan);
 ui.findReplaceModal.addEventListener("click", event => {
   const action = event.target.dataset.findAction;
   if (action === "close") closeFindReplace();
@@ -1915,7 +2059,15 @@ document.addEventListener("keydown", event => {
   const shortcut = event.metaKey || event.ctrlKey, key = event.key.toLowerCase();
   if (isImeComposing(event)) return;
   if (state.reloadConflict && shortcut) { event.preventDefault(); return; }
-  if (event.key === "Escape") { if (!ui.globalSearchModal.hidden) closeGlobalSearch(); else if (!ui.findReplaceModal.hidden) closeFindReplace(); else closeFullscreen(); }
+  if (event.key === "Escape") {
+    if (!ui.globalSearchModal.hidden) closeGlobalSearch();
+    else if (!ui.findReplaceModal.hidden) closeFindReplace();
+    else if (!ui.imageModal.hidden) closeImageViewer();
+    else if (!ui.mermaidModal.hidden) closeFullscreen();
+    else return;
+    event.preventDefault(); event.stopPropagation();
+    return;
+  }
   if (shortcut && key === "v" && editorHasFocus()) queuePasteShortcutFallback();
   if (shortcut && key === "s") { event.preventDefault(); saveCurrent(); }
   if (shortcut && event.shiftKey && key === "f") { event.preventDefault(); openGlobalSearch(); }

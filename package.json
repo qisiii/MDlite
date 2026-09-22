@@ -9,6 +9,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1",
+    "test": "node --test",
     "sync-version": "node scripts/sync-version.mjs",
     "build": "npm run sync-version && vite build",
     "tauri": "npm run sync-version && tauri",

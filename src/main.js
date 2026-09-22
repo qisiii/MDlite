@@ -15,6 +15,7 @@ import { undo, redo } from "@codemirror/commands";
 import { markdown } from "@codemirror/lang-markdown";
 import { closeSearchPanel, findNext, findPrevious, getSearchQuery, openSearchPanel, replaceAll, replaceNext, search, SearchQuery, setSearchQuery } from "@codemirror/search";
 import { autocompletion, snippetCompletion } from "@codemirror/autocomplete";
+import { decodeHtmlEntities } from "./markdown-utils.js";
 import "highlight.js/styles/github-dark.css";
 import "katex/dist/katex.min.css";
 import "./style.css";
@@ -1057,7 +1058,12 @@ function prepareTaskLists(root) {
 }
 function processRawCells(root) {
   root.querySelectorAll("table[data-feishu-table] td, table[data-feishu-table] th").forEach(cell => {
-    if (cell.innerHTML.trim()) cell.innerHTML = sanitizeHtml(renderMarkdown(cell.innerHTML));
+    // The browser entity-encodes text while serializing innerHTML. Feeding that
+    // serialization back through Markdown escapes Mermaid operators such as
+    // `->>` a second time, leaving the diagram with a literal `-&gt;&gt;` token.
+    // Decode one serialization layer while preserving intentional HTML markup.
+    const markdown = decodeHtmlEntities(cell.innerHTML);
+    if (markdown.trim()) cell.innerHTML = sanitizeHtml(renderMarkdown(markdown));
   });
 }
 function prepareMermaidBlocks(root) {

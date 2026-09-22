@@ -1,0 +1,21 @@
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.7",
+  "base_commit_sha": "edaed4fb5569ff69a5dc1245a58e4c1f35ecb5e0",
+  "prompts": {
+    "93b05feb9c9dbe35": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "conv_20260921_mermaid_both_syntaxes",
+        "model": "gpt-5"
+      },
+      "human_author": "qisiii",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 20,
+      "overriden_lines": 0
+    }
+  }
+}

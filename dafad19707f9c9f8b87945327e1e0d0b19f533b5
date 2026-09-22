@@ -1,0 +1,27 @@
+src/main.js
+  93b05feb9c9dbe35 18,1061-1066
+src/markdown-utils.js
+  93b05feb9c9dbe35 1-14
+package.json
+  93b05feb9c9dbe35 12
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.7",
+  "base_commit_sha": "dafad19707f9c9f8b87945327e1e0d0b19f533b5",
+  "prompts": {
+    "93b05feb9c9dbe35": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "conv_20260921_mermaid_both_syntaxes",
+        "model": "gpt-5"
+      },
+      "human_author": "qisiii",
+      "messages": [],
+      "total_additions": 42,
+      "total_deletions": 1,
+      "accepted_lines": 42,
+      "overriden_lines": 0
+    }
+  }
+}
